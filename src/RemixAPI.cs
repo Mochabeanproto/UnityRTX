@@ -550,6 +550,12 @@ namespace UnityRemix
 
         private static IntPtr _remixDll = IntPtr.Zero;
 
+        /// <summary>Handle to the loaded d3d9.dll (Remix runtime). Used by RemixImGui for GetProcAddress.</summary>
+        public static IntPtr RemixDllHandle => _remixDll;
+
+        /// <summary>Resolve a native export from the Remix DLL by name.</summary>
+        public static IntPtr GetRemixProcAddress(string name) => GetProcAddress(_remixDll, name);
+
         /// <summary>
         /// Load Remix DLL and initialize the API interface.
         /// This mirrors remixapi_lib_loadRemixDllAndInitialize from remix_c.h

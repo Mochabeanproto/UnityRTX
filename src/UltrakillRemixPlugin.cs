@@ -56,6 +56,7 @@ namespace UnityRemix
         private RemixRenderThread renderThread;
         private TextureCategoryManager textureCategoryManager;
         private SceneMeshScanner sceneMeshScanner;
+        private RemixSettingsUI settingsUI;
         
         private int frameCount = 0;
         private static bool isQuitting = false;
@@ -332,6 +333,14 @@ namespace UnityRemix
             // Give render thread access to scene mesh scanner
             renderThread.SetSceneMeshScanner(sceneMeshScanner);
             
+            // Initialize ImGui overlay
+            if (RemixImGui.Initialize(LogSource))
+            {
+                settingsUI = new RemixSettingsUI(LogSource, this);
+                RemixImGui.RegisterDrawCallback(new RemixImGui.DrawCallback(settingsUI.Draw));
+                LogSource.LogInfo("ImGui settings overlay registered");
+            }
+            
             LogSource.LogInfo("All components initialized");
         }
         
@@ -464,6 +473,9 @@ namespace UnityRemix
             
             LogSource.LogInfo("Cleaning up Remix...");
             
+            // Unregister ImGui callback
+            RemixImGui.UnregisterDrawCallback();
+            
             // Stop render thread
             renderThread?.Stop();
             
@@ -481,5 +493,78 @@ namespace UnityRemix
             
             LogSource.LogInfo("Remix cleanup complete");
         }
+
+        #region Config Accessors (for ImGui settings UI)
+
+        public bool GetConfigBool(string key)
+        {
+            switch (key)
+            {
+                case "EnableGameGeometry": return configUseGameGeometry.Value;
+                case "EnableDistanceCulling": return configUseDistanceCulling.Value;
+                case "UseVisibilityCulling": return configUseVisibilityCulling.Value;
+                case "EnableLights": return configEnableLights.Value;
+                case "CaptureStaticMeshes": return configCaptureStaticMeshes.Value;
+                case "CaptureSkinnedMeshes": return configCaptureSkinnedMeshes.Value;
+                case "CaptureTextures": return configCaptureTextures.Value;
+                case "CaptureMaterials": return configCaptureMaterials.Value;
+                case "EnableSceneScan": return configEnableSceneScan.Value;
+                default: return false;
+            }
+        }
+
+        public float GetConfigFloat(string key)
+        {
+            switch (key)
+            {
+                case "MaxRenderDistance": return configMaxRenderDistance.Value;
+                case "IntensityMultiplier": return configLightIntensityMultiplier.Value;
+                default: return 0f;
+            }
+        }
+
+        public int GetConfigInt(string key)
+        {
+            switch (key)
+            {
+                case "TargetFPS": return configTargetFPS.Value;
+                default: return 0;
+            }
+        }
+
+        public void SetConfig(string key, bool value)
+        {
+            switch (key)
+            {
+                case "EnableGameGeometry": configUseGameGeometry.Value = value; break;
+                case "EnableDistanceCulling": configUseDistanceCulling.Value = value; break;
+                case "UseVisibilityCulling": configUseVisibilityCulling.Value = value; break;
+                case "EnableLights": configEnableLights.Value = value; break;
+                case "CaptureStaticMeshes": configCaptureStaticMeshes.Value = value; break;
+                case "CaptureSkinnedMeshes": configCaptureSkinnedMeshes.Value = value; break;
+                case "CaptureTextures": configCaptureTextures.Value = value; break;
+                case "CaptureMaterials": configCaptureMaterials.Value = value; break;
+                case "EnableSceneScan": configEnableSceneScan.Value = value; break;
+            }
+        }
+
+        public void SetConfig(string key, float value)
+        {
+            switch (key)
+            {
+                case "MaxRenderDistance": configMaxRenderDistance.Value = value; break;
+                case "IntensityMultiplier": configLightIntensityMultiplier.Value = value; break;
+            }
+        }
+
+        public void SetConfig(string key, int value)
+        {
+            switch (key)
+            {
+                case "TargetFPS": configTargetFPS.Value = value; break;
+            }
+        }
+
+        #endregion
     }
 }
