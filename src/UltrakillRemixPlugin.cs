@@ -565,6 +565,8 @@ namespace UnityRemix
             }
         }
 
+        public void SaveConfig() => Config.Save();
+
         #endregion
     }
 }

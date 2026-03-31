@@ -94,7 +94,7 @@ namespace UnityRemix
         /// </summary>
         public void ProcessLights(int frameCount)
         {
-            if (!configEnableLights.Value || drawLightInstanceFunc == null)
+            if (!configEnableLights.Value || drawLightInstanceFunc == null || createLightFunc == null)
                 return;
             
             foreach (var light in cachedLights)
@@ -104,23 +104,15 @@ namespace UnityRemix
                 
                 int lightId = light.GetInstanceID();
                 
-                // Create or update light
-                IntPtr lightHandle = IntPtr.Zero;
+                // Always call CreateLight with current parameters. The Remix API
+                // updates the existing light in-place for dynamic lights (isDynamic=1),
+                // so parameter changes (intensity, position, color) apply immediately
+                // without needing destroy/recreate.
+                IntPtr lightHandle = CreateRemixLightFromUnity(light, frameCount);
                 
-                if (!lightCache.TryGetValue(lightId, out lightHandle) || lightHandle == IntPtr.Zero)
-                {
-                    // Create new Remix light
-                    lightHandle = CreateRemixLightFromUnity(light, frameCount);
-                    
-                    if (lightHandle != IntPtr.Zero)
-                    {
-                        lightCache[lightId] = lightHandle;
-                    }
-                }
-                
-                // Draw light instance
                 if (lightHandle != IntPtr.Zero)
                 {
+                    lightCache[lightId] = lightHandle;
                     lock (apiLock)
                     {
                         drawLightInstanceFunc(lightHandle);
@@ -150,7 +142,7 @@ namespace UnityRemix
                     pNext = IntPtr.Zero,
                     hash = (ulong)light.GetInstanceID(),
                     radiance = radiance,
-                    isDynamic = 0,
+                    isDynamic = 1,
                     ignoreViewModel = 0
                 };
                 

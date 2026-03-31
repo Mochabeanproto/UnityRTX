@@ -49,6 +49,16 @@ namespace UnityRemix
             DrawLightingSection();
             DrawPerformanceSection();
             DrawDebugSection();
+
+            RemixImGui.Separator();
+            RemixImGui.Spacing();
+
+            if (RemixImGui.Button("Save Settings", 130, 0))
+                _plugin.SaveConfig();
+
+            RemixImGui.SameLine();
+            if (RemixImGui.Button("Refresh", 80, 0))
+                SyncFromConfig();
         }
 
         private void DrawRenderingSection()

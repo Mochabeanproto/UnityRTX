@@ -28,7 +28,6 @@ namespace UnityRemix
         private List<MeshRenderer> cachedRenderers = new List<MeshRenderer>();
         private List<SkinnedMeshRenderer> cachedSkinnedRenderers = new List<SkinnedMeshRenderer>();
         private int rendererCacheFrame = -1;
-        private float maxRenderDistanceSqr;
         
         // Cached baked meshes for skinned renderers
         private Dictionary<int, Mesh> bakedMeshes = new Dictionary<int, Mesh>();
@@ -111,8 +110,6 @@ namespace UnityRemix
             this.configDebugLogInterval = debugLogInterval;
             this.configCaptureStaticMeshes = captureStaticMeshes;
             this.configCaptureSkinnedMeshes = captureSkinnedMeshes;
-            
-            this.maxRenderDistanceSqr = maxRenderDistance.Value * maxRenderDistance.Value;
         }
         
         /// <summary>
@@ -195,8 +192,9 @@ namespace UnityRemix
                 // Optional distance culling
                 if (configUseDistanceCulling.Value)
                 {
+                    float maxDist = configMaxRenderDistance.Value;
                     float sqrDistance = (renderer.bounds.center - camPos).sqrMagnitude;
-                    if (sqrDistance > maxRenderDistanceSqr)
+                    if (sqrDistance > maxDist * maxDist)
                         continue;
                 }
                 
