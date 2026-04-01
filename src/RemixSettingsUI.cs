@@ -199,7 +199,10 @@ namespace UnityRemix
                     // Checkbox column
                     RemixImGui.TableSetColumnIndex(0);
                     if (RemixImGui.Checkbox($"##ly_{layer.LayerIndex}", ref enabled))
+                    {
                         fc.SetLayerDisabled(layer.LayerIndex, !enabled);
+                        _plugin.SetConfig("DisabledLayers", fc.GetDisabledLayersString());
+                    }
 
                     // Layer name — expandable tree node for drill-down
                     RemixImGui.TableSetColumnIndex(1);
@@ -224,8 +227,14 @@ namespace UnityRemix
                             if (renderers[j].Layer != layer.LayerIndex)
                                 continue;
 
+                            bool rEnabled = !fc.IsRendererDisabled(renderers[j].InstanceId);
+
                             RemixImGui.TableNextRow();
-                            RemixImGui.TableSetColumnIndex(0); // empty
+
+                            RemixImGui.TableSetColumnIndex(0);
+                            if (RemixImGui.Checkbox($"##r_{renderers[j].InstanceId}", ref rEnabled))
+                                fc.SetRendererDisabled(renderers[j].InstanceId, !rEnabled);
+
                             RemixImGui.TableSetColumnIndex(1);
                             RemixImGui.Text($"  {renderers[j].Name}");
                             RemixImGui.TableSetColumnIndex(2);

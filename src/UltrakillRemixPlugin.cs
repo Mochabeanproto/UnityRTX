@@ -39,6 +39,7 @@ namespace UnityRemix
         
         // Scene mesh scanner settings
         private ConfigEntry<bool> configEnableSceneScan;
+        private ConfigEntry<string> configDisabledLayers;
         
         public static ManualLogSource LogSource { get; private set; }
         private RemixAPI.remixapi_Interface remixInterface;
@@ -156,6 +157,9 @@ namespace UnityRemix
             // Scene scan settings
             configEnableSceneScan = Config.Bind("SceneScan", "EnableSceneScan", true,
                 "Enable runtime scene scanning to find all static level geometry (including inactive objects). No external bake tool needed.");
+
+            configDisabledLayers = Config.Bind("Rendering", "DisabledLayers", "",
+                "Comma-separated list of Unity layer indices to disable (e.g. '8,13,21'). Managed by the in-game UI.");
             
             LogSource.LogInfo("Configuration loaded:");
             LogSource.LogInfo($"  Camera Name: '{configCameraName.Value}' (empty = auto-detect)");
@@ -311,6 +315,7 @@ namespace UnityRemix
                 configCaptureStaticMeshes,
                 configCaptureSkinnedMeshes
             );
+            frameCapture.LoadDisabledLayersString(configDisabledLayers.Value);
             
             renderThread = new RemixRenderThread(
                 LogSource,
@@ -537,6 +542,7 @@ namespace UnityRemix
             switch (key)
             {
                 case "CameraName": return configCameraName.Value;
+                case "DisabledLayers": return configDisabledLayers.Value;
                 default: return "";
             }
         }
@@ -546,6 +552,7 @@ namespace UnityRemix
             switch (key)
             {
                 case "CameraName": configCameraName.Value = value; break;
+                case "DisabledLayers": configDisabledLayers.Value = value; break;
             }
         }
 

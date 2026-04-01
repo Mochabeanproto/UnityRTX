@@ -37,8 +37,9 @@ namespace UnityRemix
         // Thread-safe renderer snapshots for UI
         private LayerSnapshot[] _layerSnapshots = Array.Empty<LayerSnapshot>();
         
-        // User-disabled layers. Checked during capture.
+        // User-disabled layers and individual renderers. Checked during capture.
         private readonly HashSet<int> _disabledLayers = new HashSet<int>();
+        private readonly HashSet<int> _disabledRendererIds = new HashSet<int>();
         private readonly object _disabledLock = new object();
         
         /// <summary>
@@ -99,6 +100,62 @@ namespace UnityRemix
             lock (_disabledLock)
             {
                 return _disabledLayers.Contains(layerIndex);
+            }
+        }
+
+        public void SetRendererDisabled(int instanceId, bool disabled)
+        {
+            lock (_disabledLock)
+            {
+                if (disabled)
+                    _disabledRendererIds.Add(instanceId);
+                else
+                    _disabledRendererIds.Remove(instanceId);
+            }
+        }
+
+        public bool IsRendererDisabled(int instanceId)
+        {
+            lock (_disabledLock)
+            {
+                return _disabledRendererIds.Contains(instanceId);
+            }
+        }
+
+        /// <summary>
+        /// Serializes disabled layers as a comma-separated string for config persistence.
+        /// </summary>
+        public string GetDisabledLayersString()
+        {
+            lock (_disabledLock)
+            {
+                if (_disabledLayers.Count == 0) return "";
+                var sb = new System.Text.StringBuilder();
+                bool first = true;
+                foreach (int layer in _disabledLayers)
+                {
+                    if (!first) sb.Append(',');
+                    sb.Append(layer);
+                    first = false;
+                }
+                return sb.ToString();
+            }
+        }
+
+        /// <summary>
+        /// Restores disabled layers from a comma-separated string.
+        /// </summary>
+        public void LoadDisabledLayersString(string csv)
+        {
+            lock (_disabledLock)
+            {
+                _disabledLayers.Clear();
+                if (string.IsNullOrEmpty(csv)) return;
+                foreach (var token in csv.Split(','))
+                {
+                    if (int.TryParse(token.Trim(), out int layer))
+                        _disabledLayers.Add(layer);
+                }
             }
         }
         
@@ -330,6 +387,9 @@ namespace UnityRemix
                 
                 if (IsLayerDisabled(renderer.gameObject.layer))
                     continue;
+
+                if (IsRendererDisabled(renderer.GetInstanceID()))
+                    continue;
                 
                 // Optional visibility culling (can cause issues in some games)
                 if (configUseVisibilityCulling.Value && !renderer.isVisible)
@@ -465,6 +525,12 @@ namespace UnityRemix
                 }
                 
                 if (IsLayerDisabled(skinned.gameObject.layer))
+                {
+                    skipped++;
+                    continue;
+                }
+
+                if (IsRendererDisabled(skinned.GetInstanceID()))
                 {
                     skipped++;
                     continue;
