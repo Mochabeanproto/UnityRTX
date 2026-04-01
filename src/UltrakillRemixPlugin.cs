@@ -189,6 +189,9 @@ namespace UnityRemix
             // Refresh light cache on scene load
             lightConverter?.RefreshLightCache();
             
+            // Refresh camera snapshots for UI
+            cameraHandler?.RefreshCameraSnapshots();
+            
             // Initialize Remix if needed
             if (remixInitialized && !deviceRegistered)
             {
@@ -431,6 +434,12 @@ namespace UnityRemix
                     lightConverter.RefreshLightCache();
                 }
                 
+                // Refresh camera snapshot for the UI
+                if (frameCount % configRendererCacheDuration.Value == 0 && cameraHandler != null)
+                {
+                    cameraHandler.RefreshCameraSnapshots();
+                }
+                
                 // Capture static meshes and camera
                 frameCapture.CaptureStaticMeshes(nextState, frameCount);
                 
@@ -523,6 +532,23 @@ namespace UnityRemix
             }
         }
 
+        public string GetConfigString(string key)
+        {
+            switch (key)
+            {
+                case "CameraName": return configCameraName.Value;
+                default: return "";
+            }
+        }
+
+        public void SetConfig(string key, string value)
+        {
+            switch (key)
+            {
+                case "CameraName": configCameraName.Value = value; break;
+            }
+        }
+
         public int GetConfigInt(string key)
         {
             switch (key)
@@ -566,6 +592,12 @@ namespace UnityRemix
         }
 
         public void SaveConfig() => Config.Save();
+
+        public RemixCameraHandler CameraHandler => cameraHandler;
+
+        public RemixFrameCapture FrameCapture => frameCapture;
+
+        public SceneMeshScanner SceneMeshScanner => sceneMeshScanner;
 
         #endregion
     }

@@ -311,6 +311,9 @@ namespace UnityRemix
                             if (instance.MeshHandle == IntPtr.Zero)
                                 continue;
                             
+                            if (frameCapture != null && frameCapture.IsLayerDisabled(instance.Layer))
+                                continue;
+                            
                             var instanceInfo = new RemixAPI.remixapi_InstanceInfo
                             {
                                 sType = RemixAPI.remixapi_StructType.REMIXAPI_STRUCT_TYPE_INSTANCE_INFO,

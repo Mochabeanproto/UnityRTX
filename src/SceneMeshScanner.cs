@@ -35,12 +35,14 @@ namespace UnityRemix
             public Vector2[] UVs;
             public SubMeshSurface[] Surfaces;
             public Matrix4x4 LocalToWorld;
+            public int Layer;
         }
 
         public struct InstanceData
         {
             public IntPtr MeshHandle;
             public RemixAPI.remixapi_Transform Transform;
+            public int Layer;
         }
 
         // Streaming: main thread pushes extracted mesh data, render thread drains batches
@@ -75,6 +77,24 @@ namespace UnityRemix
         }
 
         public bool IsStreaming => streamingActive;
+
+        /// <summary>
+        /// Returns the set of layer indices that have scanned instances.
+        /// </summary>
+        public Dictionary<int, int> GetLayerCounts()
+        {
+            var counts = new Dictionary<int, int>();
+            lock (instanceLock)
+            {
+                foreach (var inst in currentInstances)
+                {
+                    if (!counts.ContainsKey(inst.Layer))
+                        counts[inst.Layer] = 0;
+                    counts[inst.Layer]++;
+                }
+            }
+            return counts;
+        }
 
         public SceneMeshScanner(
             ManualLogSource logger,
@@ -372,6 +392,7 @@ namespace UnityRemix
                         UVs = uvs,
                         Surfaces = surfaces.ToArray(),
                         LocalToWorld = isCombinedMesh ? Matrix4x4.identity : filter.transform.localToWorldMatrix,
+                        Layer = filter.gameObject.layer,
                     });
                 }
                 queued++;
@@ -427,7 +448,8 @@ namespace UnityRemix
                 newInstances.Add(new InstanceData
                 {
                     MeshHandle = meshHandle,
-                    Transform = transform
+                    Transform = transform,
+                    Layer = entry.Layer
                 });
             }
 

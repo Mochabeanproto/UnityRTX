@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using BepInEx.Configuration;
 using BepInEx.Logging;
 using UnityEngine;
@@ -32,6 +33,74 @@ namespace UnityRemix
         // Cached baked meshes for skinned renderers
         private Dictionary<int, Mesh> bakedMeshes = new Dictionary<int, Mesh>();
         private Dictionary<int, Matrix4x4> lastSkinnedTransforms = new Dictionary<int, Matrix4x4>();
+        
+        // Thread-safe renderer snapshots for UI
+        private LayerSnapshot[] _layerSnapshots = Array.Empty<LayerSnapshot>();
+        
+        // User-disabled layers. Checked during capture.
+        private readonly HashSet<int> _disabledLayers = new HashSet<int>();
+        private readonly object _disabledLock = new object();
+        
+        /// <summary>
+        /// Immutable snapshot of a Unity layer with its renderers.
+        /// </summary>
+        public struct LayerSnapshot
+        {
+            public int LayerIndex;
+            public string LayerName;
+            public int StaticCount;
+            public int SkinnedCount;
+            public bool UserDisabled;
+        }
+        
+        /// <summary>
+        /// Immutable snapshot of a single renderer.
+        /// </summary>
+        public struct RendererSnapshot
+        {
+            public int InstanceId;
+            public string Name;
+            public string Type; // "Static" or "Skinned"
+            public int Layer;
+        }
+        
+        // Full renderer list kept alongside layers for drill-down
+        private RendererSnapshot[] _rendererSnapshots = Array.Empty<RendererSnapshot>();
+        
+        /// <summary>
+        /// Current layer snapshots. Safe to read from any thread.
+        /// </summary>
+        public LayerSnapshot[] LayerSnapshots => Volatile.Read(ref _layerSnapshots);
+        
+        /// <summary>
+        /// Current renderer snapshots. Safe to read from any thread.
+        /// </summary>
+        public RendererSnapshot[] RendererSnapshots => Volatile.Read(ref _rendererSnapshots);
+        
+        /// <summary>
+        /// Set whether a layer is disabled by the user.
+        /// </summary>
+        public void SetLayerDisabled(int layerIndex, bool disabled)
+        {
+            lock (_disabledLock)
+            {
+                if (disabled)
+                    _disabledLayers.Add(layerIndex);
+                else
+                    _disabledLayers.Remove(layerIndex);
+            }
+        }
+        
+        /// <summary>
+        /// Check if a layer is user-disabled.
+        /// </summary>
+        public bool IsLayerDisabled(int layerIndex)
+        {
+            lock (_disabledLock)
+            {
+                return _disabledLayers.Contains(layerIndex);
+            }
+        }
         
         // Mesh creation queue with materials
         private struct MeshToCreate
@@ -140,6 +209,80 @@ namespace UnityRemix
             
             rendererCacheFrame = frameCount;
             logger.LogInfo($"Renderer cache refreshed: {cachedRenderers.Count} static, {cachedSkinnedRenderers.Count} skinned");
+            
+            RefreshRendererSnapshots();
+        }
+        
+        /// <summary>
+        /// Build thread-safe renderer snapshots from the current cache. Must be called from main thread.
+        /// </summary>
+        private void RefreshRendererSnapshots()
+        {
+            // Build per-renderer snapshots
+            var renderers = new List<RendererSnapshot>();
+            // Track counts per layer: [layer] -> (static, skinned)
+            var layerCounts = new Dictionary<int, (int s, int k)>();
+            
+            for (int i = 0; i < cachedRenderers.Count; i++)
+            {
+                var r = cachedRenderers[i];
+                if (r == null) continue;
+                int layer = r.gameObject.layer;
+                renderers.Add(new RendererSnapshot
+                {
+                    InstanceId = r.GetInstanceID(),
+                    Name = r.gameObject.name ?? "(null)",
+                    Type = "Static",
+                    Layer = layer
+                });
+                if (!layerCounts.ContainsKey(layer)) layerCounts[layer] = (0, 0);
+                var c = layerCounts[layer];
+                layerCounts[layer] = (c.s + 1, c.k);
+            }
+            
+            for (int i = 0; i < cachedSkinnedRenderers.Count; i++)
+            {
+                var r = cachedSkinnedRenderers[i];
+                if (r == null) continue;
+                int layer = r.gameObject.layer;
+                renderers.Add(new RendererSnapshot
+                {
+                    InstanceId = r.GetInstanceID(),
+                    Name = r.gameObject.name ?? "(null)",
+                    Type = "Skinned",
+                    Layer = layer
+                });
+                if (!layerCounts.ContainsKey(layer)) layerCounts[layer] = (0, 0);
+                var c = layerCounts[layer];
+                layerCounts[layer] = (c.s, c.k + 1);
+            }
+            
+            // Build layer snapshots
+            var layers = new List<LayerSnapshot>();
+            lock (_disabledLock)
+            {
+                foreach (var kv in layerCounts)
+                {
+                    string name;
+                    try { name = LayerMask.LayerToName(kv.Key); }
+                    catch { name = ""; }
+                    if (string.IsNullOrEmpty(name)) name = $"Layer {kv.Key}";
+                    
+                    layers.Add(new LayerSnapshot
+                    {
+                        LayerIndex = kv.Key,
+                        LayerName = name,
+                        StaticCount = kv.Value.s,
+                        SkinnedCount = kv.Value.k,
+                        UserDisabled = _disabledLayers.Contains(kv.Key)
+                    });
+                }
+            }
+            
+            layers.Sort((a, b) => a.LayerIndex.CompareTo(b.LayerIndex));
+            
+            Volatile.Write(ref _layerSnapshots, layers.ToArray());
+            Volatile.Write(ref _rendererSnapshots, renderers.ToArray());
         }
         
         /// <summary>
@@ -183,6 +326,9 @@ namespace UnityRemix
             foreach (var renderer in cachedRenderers)
             {
                 if (renderer == null || !renderer.enabled || !renderer.gameObject.activeInHierarchy)
+                    continue;
+                
+                if (IsLayerDisabled(renderer.gameObject.layer))
                     continue;
                 
                 // Optional visibility culling (can cause issues in some games)
@@ -313,6 +459,12 @@ namespace UnityRemix
             foreach (var skinned in cachedSkinnedRenderers)
             {
                 if (skinned == null || !skinned.enabled || !skinned.gameObject.activeInHierarchy)
+                {
+                    skipped++;
+                    continue;
+                }
+                
+                if (IsLayerDisabled(skinned.gameObject.layer))
                 {
                     skipped++;
                     continue;

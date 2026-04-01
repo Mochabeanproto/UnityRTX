@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading;
 using BepInEx.Configuration;
 using BepInEx.Logging;
 using UnityEngine;
@@ -23,7 +25,30 @@ namespace UnityRemix
         // Cached delegates
         private RemixAPI.PFN_remixapi_SetupCamera setupCameraFunc;
         
+        // Thread-safe camera snapshot for UI
+        private CameraSnapshot[] _cameraSnapshots = Array.Empty<CameraSnapshot>();
+        
         public Camera CurrentCamera => currentCamera;
+        
+        /// <summary>
+        /// Immutable snapshot of a Unity camera's properties, safe to read from any thread.
+        /// </summary>
+        public struct CameraSnapshot
+        {
+            public string Name;
+            public float Depth;
+            public bool IsMain;
+            public bool Enabled;
+            public bool ActiveInHierarchy;
+            public string Tag;
+            public string ClearFlags;
+            public int CullingMask;
+        }
+        
+        /// <summary>
+        /// Current camera snapshots. Safe to read from any thread (snapshot reference is atomically swapped).
+        /// </summary>
+        public CameraSnapshot[] CameraSnapshots => Volatile.Read(ref _cameraSnapshots);
         
         public RemixCameraHandler(
             ManualLogSource logger,
@@ -81,6 +106,39 @@ namespace UnityRemix
             }
             
             logger.LogInfo("=================================");
+        }
+        
+        /// <summary>
+        /// Capture a snapshot of all scene cameras. Must be called from the main thread.
+        /// The resulting array is safe to read from any thread.
+        /// </summary>
+        public void RefreshCameraSnapshots()
+        {
+            var allCameras = UnityEngine.Object.FindObjectsOfType<Camera>();
+            var mainCam = Camera.main;
+            var snapshots = new CameraSnapshot[allCameras.Length];
+            
+            for (int i = 0; i < allCameras.Length; i++)
+            {
+                var cam = allCameras[i];
+                string tag;
+                try { tag = cam.tag; }
+                catch { tag = "(none)"; }
+                
+                snapshots[i] = new CameraSnapshot
+                {
+                    Name = cam.name ?? "(null)",
+                    Depth = cam.depth,
+                    IsMain = cam == mainCam,
+                    Enabled = cam.enabled,
+                    ActiveInHierarchy = cam.gameObject.activeInHierarchy,
+                    Tag = tag,
+                    ClearFlags = cam.clearFlags.ToString(),
+                    CullingMask = cam.cullingMask
+                };
+            }
+            
+            Volatile.Write(ref _cameraSnapshots, snapshots);
         }
         
         /// <summary>

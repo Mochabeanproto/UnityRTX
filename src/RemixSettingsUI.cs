@@ -26,6 +26,7 @@ namespace UnityRemix
         private bool _captureTextures;
         private bool _captureMaterials;
         private bool _enableSceneScan;
+        private string _selectedCameraName;
 
         public RemixSettingsUI(ManualLogSource log, UnityRemixPlugin plugin)
         {
@@ -46,6 +47,8 @@ namespace UnityRemix
             }
 
             DrawRenderingSection();
+            DrawCameraSection();
+            DrawRendererSection();
             DrawLightingSection();
             DrawPerformanceSection();
             DrawDebugSection();
@@ -85,6 +88,156 @@ namespace UnityRemix
 
             if (RemixImGui.Checkbox("Scene Scan", ref _enableSceneScan))
                 _plugin.SetConfig("EnableSceneScan", _enableSceneScan);
+        }
+
+        private void DrawCameraSection()
+        {
+            if (!RemixImGui.CollapsingHeader("Camera", RemixImGui.TreeNodeFlags_DefaultOpen))
+                return;
+
+            var camHandler = _plugin.CameraHandler;
+            if (camHandler == null)
+            {
+                RemixImGui.Text("Camera handler not initialized.");
+                return;
+            }
+
+            var snapshots = camHandler.CameraSnapshots;
+            bool isAuto = string.IsNullOrEmpty(_selectedCameraName);
+
+            if (RemixImGui.RadioButton("Auto-detect", isAuto))
+            {
+                _selectedCameraName = "";
+                _plugin.SetConfig("CameraName", "");
+            }
+
+            if (snapshots.Length == 0)
+            {
+                RemixImGui.Text("No cameras found.");
+                return;
+            }
+
+            int tableFlags = RemixImGui.TableFlags_Borders | RemixImGui.TableFlags_RowBg | RemixImGui.TableFlags_SizingStretchProp;
+            if (RemixImGui.BeginTable("##cameras", 3, tableFlags))
+            {
+                RemixImGui.TableSetupColumn("", 0, 0.05f);         // radio button
+                RemixImGui.TableSetupColumn("Name", 0, 0.75f);
+                RemixImGui.TableSetupColumn("Depth", 0, 0.2f);
+                RemixImGui.TableHeadersRow();
+
+                for (int i = 0; i < snapshots.Length; i++)
+                {
+                    var snap = snapshots[i];
+                    bool selected = !isAuto && _selectedCameraName == snap.Name;
+
+                    RemixImGui.TableNextRow();
+
+                    // Radio button column
+                    RemixImGui.TableSetColumnIndex(0);
+                    if (RemixImGui.RadioButton($"##cam_{i}", selected))
+                    {
+                        _selectedCameraName = snap.Name;
+                        _plugin.SetConfig("CameraName", snap.Name);
+                    }
+
+                    // Name column
+                    RemixImGui.TableSetColumnIndex(1);
+                    RemixImGui.Text(snap.Name);
+
+                    // Depth column
+                    RemixImGui.TableSetColumnIndex(2);
+                    RemixImGui.Text(snap.Depth.ToString("F0"));
+                }
+
+                RemixImGui.EndTable();
+            }
+        }
+
+        private void DrawRendererSection()
+        {
+            if (!RemixImGui.CollapsingHeader("Renderers"))
+                return;
+
+            var fc = _plugin.FrameCapture;
+            if (fc == null)
+            {
+                RemixImGui.Text("Frame capture not initialized.");
+                return;
+            }
+
+            var layers = fc.LayerSnapshots;
+            var renderers = fc.RendererSnapshots;
+
+            // Merge scanned instance counts from SceneMeshScanner
+            var scanner = _plugin.SceneMeshScanner;
+            var scannedCounts = scanner?.GetLayerCounts();
+
+            RemixImGui.Text($"{layers.Length} layers, {renderers.Length} active renderers");
+
+            if (layers.Length == 0)
+                return;
+
+            int tableFlags = RemixImGui.TableFlags_Borders | RemixImGui.TableFlags_RowBg | RemixImGui.TableFlags_SizingStretchProp;
+            if (RemixImGui.BeginTable("##layers", 4, tableFlags, 0, 300))
+            {
+                RemixImGui.TableSetupColumn("On", 0, 0.06f);
+                RemixImGui.TableSetupColumn("Layer", 0, 0.50f);
+                RemixImGui.TableSetupColumn("Active", 0, 0.22f);
+                RemixImGui.TableSetupColumn("Scanned", 0, 0.22f);
+                RemixImGui.TableHeadersRow();
+
+                for (int i = 0; i < layers.Length; i++)
+                {
+                    var layer = layers[i];
+                    bool enabled = !layer.UserDisabled;
+                    int scannedCount = 0;
+                    scannedCounts?.TryGetValue(layer.LayerIndex, out scannedCount);
+                    int activeCount = layer.StaticCount + layer.SkinnedCount;
+
+                    RemixImGui.TableNextRow();
+
+                    // Checkbox column
+                    RemixImGui.TableSetColumnIndex(0);
+                    if (RemixImGui.Checkbox($"##ly_{layer.LayerIndex}", ref enabled))
+                        fc.SetLayerDisabled(layer.LayerIndex, !enabled);
+
+                    // Layer name — expandable tree node for drill-down
+                    RemixImGui.TableSetColumnIndex(1);
+                    string label = string.IsNullOrEmpty(layer.LayerName)
+                        ? $"Layer {layer.LayerIndex}"
+                        : $"{layer.LayerName} ({layer.LayerIndex})";
+                    bool expanded = RemixImGui.TreeNode($"{label}##ly_{layer.LayerIndex}");
+
+                    // Active count column
+                    RemixImGui.TableSetColumnIndex(2);
+                    RemixImGui.Text($"{activeCount}");
+
+                    // Scanned count column
+                    RemixImGui.TableSetColumnIndex(3);
+                    RemixImGui.Text(scannedCount > 0 ? $"{scannedCount}" : "-");
+
+                    // Drill-down: show individual renderers in this layer
+                    if (expanded)
+                    {
+                        for (int j = 0; j < renderers.Length; j++)
+                        {
+                            if (renderers[j].Layer != layer.LayerIndex)
+                                continue;
+
+                            RemixImGui.TableNextRow();
+                            RemixImGui.TableSetColumnIndex(0); // empty
+                            RemixImGui.TableSetColumnIndex(1);
+                            RemixImGui.Text($"  {renderers[j].Name}");
+                            RemixImGui.TableSetColumnIndex(2);
+                            RemixImGui.Text(renderers[j].Type);
+                            RemixImGui.TableSetColumnIndex(3); // empty
+                        }
+                        RemixImGui.TreePop();
+                    }
+                }
+
+                RemixImGui.EndTable();
+            }
         }
 
         private void DrawLightingSection()
@@ -139,6 +292,7 @@ namespace UnityRemix
             _captureSkinnedMeshes = _plugin.GetConfigBool("CaptureSkinnedMeshes");
             _captureTextures = _plugin.GetConfigBool("CaptureTextures");
             _captureMaterials = _plugin.GetConfigBool("CaptureMaterials");
+            _selectedCameraName = _plugin.GetConfigString("CameraName");
         }
 
         public void ResetState() { _initialized = false; }

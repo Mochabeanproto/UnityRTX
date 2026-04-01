@@ -461,6 +461,17 @@ namespace UnityRemix
         public static bool ColorEdit4(string label, float[] col, int flags = 0) => _colorEdit4?.Invoke(label, col, flags) != 0;
         public static bool ColorPicker3(string label, float[] col) => _colorPicker3?.Invoke(label, col) != 0;
 
+        public static bool InputText(string label, byte[] buf, int flags = 0)
+        {
+            if (_inputText == null) return false;
+            var pin = System.Runtime.InteropServices.GCHandle.Alloc(buf, System.Runtime.InteropServices.GCHandleType.Pinned);
+            try
+            {
+                return _inputText(label, pin.AddrOfPinnedObject(), (uint)buf.Length, flags) != 0;
+            }
+            finally { pin.Free(); }
+        }
+
         #endregion
 
         #region Public API — Combo
