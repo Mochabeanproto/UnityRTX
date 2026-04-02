@@ -153,7 +153,7 @@ namespace UnityRemix
             {
                 _disabledLayers.Clear();
                 if (string.IsNullOrEmpty(csv)) return;
-                foreach (var token in csv.Split(','))
+                foreach (var token in csv.Split(new[] { ',' }))
                 {
                     if (int.TryParse(token.Trim(), out int layer))
                         _disabledLayers.Add(layer);

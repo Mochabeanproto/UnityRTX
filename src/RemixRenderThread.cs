@@ -354,7 +354,9 @@ namespace UnityRemix
                     {
                         // GPU skinning path: create mesh once with bone weights, draw with bone transforms each frame
                         IntPtr meshHandle;
-                        if (!skinned.skinningData.meshCreated)
+                        if (!skinned.skinningData.meshCreated ||
+                            !meshConverter.TryGetSkinnedMeshHandle(skinned.meshId, out meshHandle) ||
+                            meshHandle == IntPtr.Zero)
                         {
                             meshHandle = meshConverter.CreateSkinnedMeshWithBones(
                                 skinned.meshId,
@@ -373,10 +375,6 @@ namespace UnityRemix
                             
                             meshConverter.UpdateSkinnedMeshHandle(skinned.meshId, meshHandle);
                             skinned.skinningData.meshCreated = true;
-                        }
-                        else if (!meshConverter.TryGetSkinnedMeshHandle(skinned.meshId, out meshHandle) || meshHandle == IntPtr.Zero)
-                        {
-                            continue;
                         }
                         
                         updatedMeshes.Add(skinned.meshId);
