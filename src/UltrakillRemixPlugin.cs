@@ -126,8 +126,8 @@ namespace UnityRemix
                 new ConfigDescription("Number of frames to cache renderer list before refreshing.",
                     new AcceptableValueRange<int>(60, 3600)));
             
-            configDebugLogInterval = Config.Bind("Debug", "DetailedLogInterval", 1800,
-                new ConfigDescription("Number of frames between detailed logs. Set to 0 to disable.",
+            configDebugLogInterval = Config.Bind("Debug", "DetailedLogInterval", 0,
+                new ConfigDescription("Number of frames between detailed diagnostic logs (skinned dumps, prune reasons, mesh failures). 0 = disabled.",
                     new AcceptableValueRange<int>(0, 10800)));
             
             // Lighting Settings
