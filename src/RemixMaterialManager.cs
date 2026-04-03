@@ -35,6 +35,27 @@ namespace UnityRemix
         private ulong debugTextureHash;
         private const string DebugTextureHashPath = "0xDEBB0600DEBB0600"; // stable sentinel
         
+        // DXT5nm Z reconstruction: zLookup[x * 256 + y] = byte Z given X,Y normal components.
+        // Precomputed once to avoid per-pixel sqrt during normal map unpacking.
+        private static readonly byte[] zLookup = BuildZLookup();
+        private static byte[] BuildZLookup()
+        {
+            var t = new byte[256 * 256];
+            for (int x = 0; x < 256; x++)
+            {
+                float nx = x / 127.5f - 1f;
+                float nx2 = nx * nx;
+                for (int y = 0; y < 256; y++)
+                {
+                    float ny = y / 127.5f - 1f;
+                    float nz2 = 1f - nx2 - ny * ny;
+                    float nz = nz2 > 0f ? (float)Math.Sqrt(nz2) : 0f;
+                    t[x * 256 + y] = (byte)(nz * 127.5f + 127.5f);
+                }
+            }
+            return t;
+        }
+        
         // Cache for texture hashes - maps Unity texture instance ID to XXH64 hash
         private Dictionary<int, ulong> textureHashCache = new Dictionary<int, ulong>();
         
@@ -273,6 +294,7 @@ namespace UnityRemix
             
             // Upload albedo texture
             Texture2D albedoTex = null;
+            string shaderName = material.shader != null ? material.shader.name : "null";
             if (captureTextures.Value && material.HasProperty("_MainTex"))
             {
                 var tex = material.GetTexture("_MainTex") as Texture2D;
@@ -293,8 +315,11 @@ namespace UnityRemix
                             matData.albedoTextureHash = hash;
                         }
                         
-                        // Fallback: if shader metadata says Opaque but the texture has alpha, upgrade to Cutout
-                        if (matData.alphaMode == AlphaMode.Opaque && texturesWithAlpha.Contains(texId))
+                        // Fallback: if shader metadata says Opaque but the texture has alpha, upgrade to Cutout.
+                        // Skip if the shader name explicitly contains "Opaque" — the alpha channel is likely
+                        // roughness/smoothness/AO, not transparency (common Unity texture packing convention).
+                        if (matData.alphaMode == AlphaMode.Opaque && texturesWithAlpha.Contains(texId)
+                            && (shaderName == null || shaderName.IndexOf("Opaque", StringComparison.OrdinalIgnoreCase) < 0))
                         {
                             matData.alphaMode = AlphaMode.Cutout;
                             if (!material.HasProperty("_Cutoff"))
@@ -307,7 +332,6 @@ namespace UnityRemix
             }
             
             // Dump shader properties once per shader to discover emission/color property names
-            string shaderName = material.shader != null ? material.shader.name : "null";
             if (material.shader != null && !loggedShaderProperties.Contains(shaderName))
             {
                 loggedShaderProperties.Add(shaderName);
@@ -447,6 +471,56 @@ namespace UnityRemix
                     }
                 }
                 
+                // Stanley Parable custom emissive shaders: emission texture in _TextureSample1 or _TextureSample2,
+                // intensity in _Emission (Range), with optional _Useemissionmaponly toggle.
+                // These shaders have "Emissive" in the name but use non-standard property names.
+                if (!hasEmission && shaderName.IndexOf("Emissive", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    // Find emission texture: _TextureSample1, _TextureSample2, or fall back to albedo
+                    Texture2D stanleyEmTex = null;
+                    string emTexProp = null;
+                    foreach (var prop in new[] { "_TextureSample1", "_TextureSample2" })
+                    {
+                        if (material.HasProperty(prop))
+                        {
+                            stanleyEmTex = material.GetTexture(prop) as Texture2D;
+                            if (stanleyEmTex != null) { emTexProp = prop; break; }
+                        }
+                    }
+                    
+                    // Read intensity from _Emission (Range) if present, default to 1.0
+                    float emIntensity = 1.0f;
+                    if (material.HasProperty("_Emission"))
+                        emIntensity = material.GetFloat("_Emission");
+                    
+                    if (emIntensity > 0f)
+                    {
+                        matData.emissiveColor = Color.white;
+                        matData.emissiveIntensity = emIntensity;
+                        
+                        if (stanleyEmTex != null)
+                        {
+                            matData.emissiveHandle = UploadUnityTexture(stanleyEmTex, srgb: true);
+                            if (matData.emissiveHandle != IntPtr.Zero)
+                            {
+                                int emTexId = stanleyEmTex.GetInstanceID();
+                                if (textureHashCache.TryGetValue(emTexId, out ulong emHash))
+                                    matData.emissiveTextureHash = emHash;
+                            }
+                        }
+                        else if (albedoTex != null)
+                        {
+                            // No dedicated emission texture — use albedo as emission source
+                            matData.emissiveHandle = matData.albedoHandle;
+                            matData.emissiveTextureHash = matData.albedoTextureHash;
+                        }
+                        
+                        hasEmission = matData.emissiveHandle != IntPtr.Zero;
+                        if (hasEmission && verboseTextureLogging.Value)
+                            logger.LogInfo($"[StanleyEmission] '{material.name}': tex={emTexProp ?? "albedo"} intensity={emIntensity:F3}");
+                    }
+                }
+                
                 // TextMeshPro Distance Field: self-lit UI text — use _FaceColor as emissive tint.
                 // SDF atlases are typically Alpha8 format: after GPU readback the glyph shapes
                 // live in the alpha channel while RGB is black. We must convert alpha → RGB
@@ -504,7 +578,7 @@ namespace UnityRemix
                 var tex = material.GetTexture("_BumpMap") as Texture2D;
                 if (tex != null)
                 {
-                    matData.normalHandle = UploadUnityTexture(tex, srgb: false);
+                    matData.normalHandle = UploadUnityTexture(tex, srgb: false, isNormalMap: true);
                     if (matData.normalHandle != IntPtr.Zero)
                     {
                         int texId = tex.GetInstanceID();
@@ -533,7 +607,7 @@ namespace UnityRemix
         /// <summary>
         /// Upload Unity texture to Remix
         /// </summary>
-        public IntPtr UploadUnityTexture(Texture2D unityTexture, bool srgb = true)
+        public IntPtr UploadUnityTexture(Texture2D unityTexture, bool srgb = true, bool isNormalMap = false)
         {
             if (unityTexture == null || createTextureFunc == null)
                 return IntPtr.Zero;
@@ -554,8 +628,33 @@ namespace UnityRemix
                 RemixAPI.remixapi_Format format;
                 uint actualMipLevels = (uint)unityTexture.mipmapCount;
                 
+                // DXT5nm normal maps pack X in alpha and Y in green. Raw DXT5 upload
+                // would pass the packed channels to Remix unchanged, so we must decompress
+                // and unswizzle. Readable textures use GetPixels32 (CPU); non-readable use GPU readback.
+                bool isDXT5nm = isNormalMap &&
+                    (unityTexture.format == TextureFormat.DXT5 || unityTexture.format == TextureFormat.DXT5Crunched);
+                
+                // Readable DXT5nm: decompress on CPU to avoid GPU stall
+                if (isDXT5nm && unityTexture.isReadable)
+                {
+                    Color32[] pixels = unityTexture.GetPixels32();
+                    pixelData = new byte[pixels.Length * 4];
+                    for (int i = 0; i < pixels.Length; i++)
+                    {
+                        byte x = pixels[i].a; // alpha = X
+                        byte y = pixels[i].g; // green = Y
+                        pixelData[i * 4 + 0] = x;
+                        pixelData[i * 4 + 1] = y;
+                        pixelData[i * 4 + 2] = zLookup[x * 256 + y];
+                        pixelData[i * 4 + 3] = 255;
+                    }
+                    hashSourceData = pixelData;
+                    format = RemixAPI.remixapi_Format.REMIXAPI_FORMAT_R8G8B8A8_UNORM;
+                    if (verboseTextureLogging.Value)
+                        logger.LogInfo($"Unpacked readable DXT5nm normal map '{unityTexture.name}' ({unityTexture.width}x{unityTexture.height})");
+                }
                 // Handle non-readable textures via GPU readback
-                if (!unityTexture.isReadable)
+                else if (!unityTexture.isReadable)
                 {
                     if (verboseTextureLogging.Value)
                         logger.LogInfo($"Texture '{unityTexture.name}' is not readable - forcing GPU readback");
@@ -577,6 +676,24 @@ namespace UnityRemix
                     RenderTexture.ReleaseTemporary(tmp);
                     
                     pixelData = readableTexture.GetRawTextureData();
+                    
+                    // DXT5nm: X stored in alpha, Y stored in green.
+                    // Reconstruct standard tangent-space normal map: R=X, G=Y, B=Z, A=255.
+                    if (isDXT5nm)
+                    {
+                        for (int i = 0; i < pixelData.Length; i += 4)
+                        {
+                            byte x = pixelData[i + 3]; // alpha = X
+                            byte y = pixelData[i + 1]; // green = Y
+                            pixelData[i + 0] = x;      // R = X
+                            pixelData[i + 1] = y;      // G = Y (unchanged)
+                            pixelData[i + 2] = zLookup[x * 256 + y]; // B = Z
+                            pixelData[i + 3] = 255;
+                        }
+                        if (verboseTextureLogging.Value)
+                            logger.LogInfo($"Unpacked DXT5nm normal map '{unityTexture.name}' ({unityTexture.width}x{unityTexture.height})");
+                    }
+                    
                     hashSourceData = pixelData;
                     format = srgb ? RemixAPI.remixapi_Format.REMIXAPI_FORMAT_R8G8B8A8_SRGB 
                                   : RemixAPI.remixapi_Format.REMIXAPI_FORMAT_R8G8B8A8_UNORM;

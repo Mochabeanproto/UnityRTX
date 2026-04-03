@@ -20,6 +20,30 @@ namespace UnityRemix
         {
             return (uint)(c.b | (c.g << 8) | (c.r << 16) | (c.a << 24));
         }
+
+        /// <summary>
+        /// Compute per-vertex normals by averaging face normals of adjacent triangles.
+        /// </summary>
+        private static Vector3[] ComputeFaceNormals(Vector3[] verts, int[] triangles)
+        {
+            var normals = new Vector3[verts.Length];
+            for (int i = 0; i + 2 < triangles.Length; i += 3)
+            {
+                int i0 = triangles[i], i1 = triangles[i + 1], i2 = triangles[i + 2];
+                if (i0 >= verts.Length || i1 >= verts.Length || i2 >= verts.Length) continue;
+                var faceNormal = Vector3.Cross(verts[i1] - verts[i0], verts[i2] - verts[i0]);
+                normals[i0] += faceNormal;
+                normals[i1] += faceNormal;
+                normals[i2] += faceNormal;
+            }
+            for (int i = 0; i < normals.Length; i++)
+            {
+                float len = normals[i].magnitude;
+                normals[i] = len > 1e-6f ? normals[i] / len : Vector3.up;
+            }
+            return normals;
+        }
+
         private readonly ManualLogSource logger;
         private readonly RemixMaterialManager materialManager;
         private readonly ConfigEntry<int> configDebugLogInterval;
@@ -165,12 +189,24 @@ namespace UnityRemix
                 }
             }
             
-            // Ensure normals
+            // Ensure normals — compute from face geometry when unavailable
             if (normals == null || normals.Length != vertices.Length)
             {
-                normals = new Vector3[vertices.Length];
+                normals = ComputeFaceNormals(vertices, triangles);
+                logger.LogDebug($"Mesh '{mesh.name}': normals missing, computed from face geometry");
+            }
+            else
+            {
+                // Diagnostic: log a sample of vertex normals to detect zero/degenerate data
+                int zeroCount = 0;
+                Vector3 sample = Vector3.zero;
                 for (int i = 0; i < normals.Length; i++)
-                    normals[i] = Vector3.up;
+                {
+                    if (normals[i].sqrMagnitude < 1e-6f) zeroCount++;
+                    else if (sample == Vector3.zero) sample = normals[i];
+                }
+                if (zeroCount > 0)
+                    logger.LogWarning($"Mesh '{mesh.name}': {zeroCount}/{normals.Length} normals are zero-length, sample=({sample.x:F3},{sample.y:F3},{sample.z:F3})");
             }
             
             // Ensure UVs
@@ -315,12 +351,11 @@ namespace UnityRemix
             // Stable hash per skinned renderer — lets Remix track the mesh across frames
             ulong dynamicHash = (ulong)unchecked((uint)meshId);
             
-            // Ensure normals
+            // Ensure normals — compute from face geometry when unavailable
             if (normals == null || normals.Length != vertices.Length)
             {
-                normals = new Vector3[vertices.Length];
-                for (int i = 0; i < normals.Length; i++)
-                    normals[i] = Vector3.up;
+                normals = ComputeFaceNormals(vertices, triangles);
+                logger.LogDebug($"Skinned mesh {meshId}: normals missing, computed from face geometry");
             }
             
             // Ensure UVs

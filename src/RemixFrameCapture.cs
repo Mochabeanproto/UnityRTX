@@ -27,6 +27,7 @@ namespace UnityRemix
         private readonly ConfigEntry<bool> configCaptureStaticMeshes;
         private readonly ConfigEntry<bool> configCaptureSkinnedMeshes;
         private readonly ConfigEntry<bool> configHardwareSkinning;
+        private readonly ConfigEntry<bool> configPersistDisabledRenderers;
         
         // Renderer caching
         private List<MeshRenderer> cachedRenderers = new List<MeshRenderer>();
@@ -297,7 +298,8 @@ namespace UnityRemix
             ConfigEntry<int> debugLogInterval,
             ConfigEntry<bool> captureStaticMeshes,
             ConfigEntry<bool> captureSkinnedMeshes,
-            ConfigEntry<bool> hardwareSkinning)
+            ConfigEntry<bool> hardwareSkinning,
+            ConfigEntry<bool> persistDisabledRenderers)
         {
             this.logger = logger;
             this.cameraHandler = cameraHandler;
@@ -311,6 +313,7 @@ namespace UnityRemix
             this.configCaptureStaticMeshes = captureStaticMeshes;
             this.configCaptureSkinnedMeshes = captureSkinnedMeshes;
             this.configHardwareSkinning = hardwareSkinning;
+            this.configPersistDisabledRenderers = persistDisabledRenderers;
         }
         
         /// <summary>
@@ -574,7 +577,11 @@ namespace UnityRemix
             
             // Draw persistent instances for disabled (but not destroyed) renderers.
             // This keeps objects visible that the game deactivates (e.g. CyberGrind cubes after wave settles).
+            // Gated by config — disabled by default since games with scene variants (e.g. Stanley Parable)
+            // use inactive GameObjects for alternate rooms that should NOT be rendered.
             int persistentDrawn = 0;
+            if (configPersistDisabledRenderers.Value)
+            {
             var keysToRemove = (List<int>)null;
             foreach (var kv in persistentStaticInstances)
             {
@@ -611,6 +618,7 @@ namespace UnityRemix
             {
                 foreach (var key in keysToRemove)
                     persistentStaticInstances.Remove(key);
+            }
             }
             
             // Periodic tracking

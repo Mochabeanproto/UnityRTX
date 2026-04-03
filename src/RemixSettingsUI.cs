@@ -28,6 +28,8 @@ namespace UnityRemix
         private bool _captureTextures;
         private bool _captureMaterials;
         private bool _enableSceneScan;
+        private bool _sceneScanActiveOnly;
+        private bool _persistDisabledRenderers;
         private string _selectedCameraName;
 
         public RemixSettingsUI(ManualLogSource log, UnityRemixPlugin plugin)
@@ -90,6 +92,16 @@ namespace UnityRemix
 
             if (RemixImGui.Checkbox("Scene Scan", ref _enableSceneScan))
                 _plugin.SetConfig("EnableSceneScan", _enableSceneScan);
+
+            if (RemixImGui.Checkbox("Active Renderers Only", ref _sceneScanActiveOnly))
+                _plugin.SetConfig("ActiveRenderersOnly", _sceneScanActiveOnly);
+            if (RemixImGui.IsItemHovered())
+                RemixImGui.SetTooltip("Only render geometry from active renderers. Prevents ghost geometry\nfrom inactive scene variants (e.g. Stanley Parable). Requires scene reload.");
+
+            if (RemixImGui.Checkbox("Persist Disabled Renderers", ref _persistDisabledRenderers))
+                _plugin.SetConfig("PersistDisabledRenderers", _persistDisabledRenderers);
+            if (RemixImGui.IsItemHovered())
+                RemixImGui.SetTooltip("Keep drawing meshes after the game deactivates them.\nEnable for games that temporarily hide visible geometry (e.g. ULTRAKILL CyberGrind).");
         }
 
         private void DrawCameraSection()
@@ -303,6 +315,8 @@ namespace UnityRemix
             _maxRenderDistance = _plugin.GetConfigFloat("MaxRenderDistance");
             _enableVisibilityCulling = _plugin.GetConfigBool("UseVisibilityCulling");
             _enableSceneScan = _plugin.GetConfigBool("EnableSceneScan");
+            _sceneScanActiveOnly = _plugin.GetConfigBool("ActiveRenderersOnly");
+            _persistDisabledRenderers = _plugin.GetConfigBool("PersistDisabledRenderers");
             _enableLights = _plugin.GetConfigBool("EnableLights");
             _lightIntensityMultiplier = _plugin.GetConfigFloat("IntensityMultiplier");
             _targetFPS = _plugin.GetConfigInt("TargetFPS");

@@ -41,7 +41,9 @@ namespace UnityRemix
         
         // Scene mesh scanner settings
         private ConfigEntry<bool> configEnableSceneScan;
+        private ConfigEntry<bool> configSceneScanActiveOnly;
         private ConfigEntry<string> configDisabledLayers;
+        private ConfigEntry<bool> configPersistDisabledRenderers;
         
         public static ManualLogSource LogSource { get; private set; }
         private RemixAPI.remixapi_Interface remixInterface;
@@ -165,6 +167,12 @@ namespace UnityRemix
             // Scene scan settings
             configEnableSceneScan = Config.Bind("SceneScan", "EnableSceneScan", true,
                 "Enable runtime scene scanning to find all static level geometry (including inactive objects). No external bake tool needed.");
+
+            configSceneScanActiveOnly = Config.Bind("SceneScan", "ActiveRenderersOnly", true,
+                "Only scan and draw renderers that are currently active. Prevents ghost geometry from inactive scene variants (e.g. The Stanley Parable). Disable for games where inactive geometry should remain visible.");
+
+            configPersistDisabledRenderers = Config.Bind("Rendering", "PersistDisabledRenderers", false,
+                "Keep drawing static meshes after their renderer is deactivated by the game. Enable for games that temporarily deactivate visible geometry (e.g. ULTRAKILL CyberGrind).");
 
             configDisabledLayers = Config.Bind("Rendering", "DisabledLayers", "",
                 "Comma-separated list of Unity layer indices to disable (e.g. '8,13,21'). Managed by the in-game UI.");
@@ -323,7 +331,8 @@ namespace UnityRemix
                 configDebugLogInterval,
                 configCaptureStaticMeshes,
                 configCaptureSkinnedMeshes,
-                configHardwareSkinning
+                configHardwareSkinning,
+                configPersistDisabledRenderers
             );
             frameCapture.LoadDisabledLayersString(configDisabledLayers.Value);
             
@@ -345,7 +354,8 @@ namespace UnityRemix
                 LogSource,
                 meshConverter,
                 materialManager,
-                remixApiLock
+                remixApiLock,
+                configSceneScanActiveOnly.Value
             );
             
             // Give render thread access to scene mesh scanner
@@ -412,6 +422,9 @@ namespace UnityRemix
             // Rescan for async-loaded meshes (Addressables, etc.)
             if (configEnableSceneScan.Value)
                 sceneMeshScanner?.Update(Time.unscaledDeltaTime);
+
+            // Update visibility of scanned instances (filters out inactive renderers)
+            sceneMeshScanner?.UpdateVisibility();
         }
         
         void LateUpdate()
@@ -534,6 +547,8 @@ namespace UnityRemix
                 case "CaptureTextures": return configCaptureTextures.Value;
                 case "CaptureMaterials": return configCaptureMaterials.Value;
                 case "EnableSceneScan": return configEnableSceneScan.Value;
+                case "ActiveRenderersOnly": return configSceneScanActiveOnly.Value;
+                case "PersistDisabledRenderers": return configPersistDisabledRenderers.Value;
                 default: return false;
             }
         }
@@ -590,6 +605,8 @@ namespace UnityRemix
                 case "CaptureTextures": configCaptureTextures.Value = value; break;
                 case "CaptureMaterials": configCaptureMaterials.Value = value; break;
                 case "EnableSceneScan": configEnableSceneScan.Value = value; break;
+                case "ActiveRenderersOnly": configSceneScanActiveOnly.Value = value; break;
+                case "PersistDisabledRenderers": configPersistDisabledRenderers.Value = value; break;
             }
         }
 

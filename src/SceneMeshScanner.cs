@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading;
 using BepInEx.Logging;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -37,6 +39,7 @@ namespace UnityRemix
             public SubMeshSurface[] Surfaces;
             public Matrix4x4 LocalToWorld;
             public int Layer;
+            public Renderer SourceRenderer;
         }
 
         public struct InstanceData
@@ -53,7 +56,11 @@ namespace UnityRemix
 
         // Completed instances drawn every frame
         private readonly List<InstanceData> currentInstances = new List<InstanceData>();
+        private readonly List<Renderer> instanceRenderers = new List<Renderer>();
         private readonly object instanceLock = new object();
+
+        // Visibility-filtered snapshot: built on main thread, read on render thread
+        private InstanceData[] visibleInstances;
 
         // Mesh handle dedup: same geometry → same Remix handle
         private readonly Dictionary<ulong, IntPtr> meshHandles = new Dictionary<ulong, IntPtr>();
@@ -61,7 +68,8 @@ namespace UnityRemix
         // Track which MeshFilter instance IDs we've already scanned (avoids duplicates across rescans)
         private readonly HashSet<int> scannedFilterIds = new HashSet<int>();
 
-
+        // When true, skip inactive renderers during scan (saves memory, prevents scanning ghost geometry)
+        private readonly bool scanActiveOnly;
 
         // Rescan state: async-loaded objects appear after OnSceneLoaded
         private Scene activeScene;
@@ -101,12 +109,14 @@ namespace UnityRemix
             ManualLogSource logger,
             RemixMeshConverter meshConverter,
             RemixMaterialManager materialManager,
-            object apiLock)
+            object apiLock,
+            bool scanActiveOnly = true)
         {
             this.logger = logger;
             this.meshConverter = meshConverter;
             this.materialManager = materialManager;
             this.apiLock = apiLock;
+            this.scanActiveOnly = scanActiveOnly;
         }
 
         /// <summary>
@@ -165,25 +175,51 @@ namespace UnityRemix
         }
 
         /// <summary>
-        /// Called on the render thread each frame. Drains a batch from the queue,
-        /// creates Remix meshes, and returns all instances accumulated so far.
+        /// Called on the render thread each frame. Drains a batch from the queue
+        /// and returns the visibility-filtered snapshot built by UpdateVisibility().
         /// </summary>
         public InstanceData[] GetInstances()
         {
             DrainStreamingBatch();
+            return Volatile.Read(ref visibleInstances);
+        }
 
+        /// <summary>
+        /// Must be called on the main thread each frame. Checks which scanned instances
+        /// have an active renderer and builds a filtered snapshot for the render thread.
+        /// This prevents ghost geometry from inactive scene variants.
+        /// </summary>
+        public void UpdateVisibility()
+        {
             lock (instanceLock)
             {
-                return currentInstances.Count > 0 ? currentInstances.ToArray() : null;
+                if (currentInstances.Count == 0)
+                {
+                    Volatile.Write(ref visibleInstances, null);
+                    return;
+                }
+
+                var visible = new List<InstanceData>(currentInstances.Count);
+                for (int i = 0; i < currentInstances.Count; i++)
+                {
+                    if (i >= instanceRenderers.Count)
+                        break;
+                    var renderer = instanceRenderers[i];
+                    if (renderer != null && renderer.enabled && renderer.gameObject.activeInHierarchy)
+                        visible.Add(currentInstances[i]);
+                }
+
+                Volatile.Write(ref visibleInstances, visible.Count > 0 ? visible.ToArray() : null);
             }
         }
 
         public void ClearData()
         {
-            lock (instanceLock) { currentInstances.Clear(); }
+            lock (instanceLock) { currentInstances.Clear(); instanceRenderers.Clear(); }
             lock (streamLock) { streamingQueue.Clear(); }
             meshHandles.Clear();
             scannedFilterIds.Clear();
+            Volatile.Write(ref visibleInstances, null);
             activeScene = default;
         }
 
@@ -193,6 +229,7 @@ namespace UnityRemix
             var combinedDataCache = new Dictionary<int, (Vector3[] verts, Vector3[] norms, Vector2[] uvs, Color32[] cols, int[][] subIndices)>();
             int queued = 0;
             int skippedAlreadyScanned = 0, skippedWrongScene = 0, skippedNoRenderer = 0;
+            int skippedInactive = 0;
             int skippedNoMesh = 0, skippedNoVerts = 0, skippedNoTris = 0, skippedReadError = 0;
             int gpuReadbackCount = 0;
             int vertexColorCount = 0;
@@ -220,6 +257,14 @@ namespace UnityRemix
                 {
                     skippedNoRenderer++;
                     scannedFilterIds.Add(filterId);
+                    continue;
+                }
+
+                // Skip inactive renderers to avoid scanning ghost geometry from alternate scene variants.
+                // Don't add to scannedFilterIds — rescans will retry when the object becomes active.
+                if (scanActiveOnly && (!renderer.enabled || !renderer.gameObject.activeInHierarchy))
+                {
+                    skippedInactive++;
                     continue;
                 }
 
@@ -403,6 +448,7 @@ namespace UnityRemix
                         Surfaces = surfaces.ToArray(),
                         LocalToWorld = isCombinedMesh ? Matrix4x4.identity : filter.transform.localToWorldMatrix,
                         Layer = filter.gameObject.layer,
+                        SourceRenderer = renderer,
                     });
                 }
                 queued++;
@@ -412,7 +458,7 @@ namespace UnityRemix
             {
                 logger.LogInfo($"Scene scan '{scene.name}': {filters.Length} total MeshFilters, {queued} queued ({gpuReadbackCount} via GPU readback, {vertexColorCount} with vertex colors)" +
                     $" | skipped: {skippedWrongScene} wrong scene, {skippedAlreadyScanned} already scanned," +
-                    $" {skippedNoRenderer} no renderer, {skippedNoMesh} no mesh," +
+                    $" {skippedInactive} inactive, {skippedNoRenderer} no renderer, {skippedNoMesh} no mesh," +
                     $" {skippedReadError} read error, {skippedNoVerts} no verts, {skippedNoTris} no tris");
             }
 
@@ -440,6 +486,7 @@ namespace UnityRemix
             }
 
             var newInstances = new List<InstanceData>(batch.Length);
+            var newRenderers = new List<Renderer>(batch.Length);
 
             foreach (var entry in batch)
             {
@@ -461,6 +508,7 @@ namespace UnityRemix
                     Transform = transform,
                     Layer = entry.Layer
                 });
+                newRenderers.Add(entry.SourceRenderer);
             }
 
             if (newInstances.Count > 0)
@@ -468,6 +516,7 @@ namespace UnityRemix
                 lock (instanceLock)
                 {
                     currentInstances.AddRange(newInstances);
+                    instanceRenderers.AddRange(newRenderers);
                 }
             }
         }
@@ -485,9 +534,8 @@ namespace UnityRemix
 
             if (norms == null || norms.Length != verts.Length)
             {
-                norms = new Vector3[verts.Length];
-                for (int i = 0; i < norms.Length; i++)
-                    norms[i] = Vector3.up;
+                norms = ComputeFaceNormals(verts, data.Surfaces.Select(s => s.Indices).ToArray());
+                logger.LogDebug($"Mesh 0x{data.MeshHash:X16}: normals missing, computed from face geometry");
             }
 
             if (uvs == null || uvs.Length != verts.Length)
@@ -861,6 +909,33 @@ namespace UnityRemix
             return positions.Length > 0 && totalIndices > 0;
         }
 
+        /// <summary>
+        /// Compute per-vertex normals by averaging face normals of adjacent triangles.
+        /// </summary>
+        private static Vector3[] ComputeFaceNormals(Vector3[] verts, int[][] subMeshIndices)
+        {
+            var normals = new Vector3[verts.Length];
+            foreach (var indices in subMeshIndices)
+            {
+                if (indices == null) continue;
+                for (int i = 0; i + 2 < indices.Length; i += 3)
+                {
+                    int i0 = indices[i], i1 = indices[i + 1], i2 = indices[i + 2];
+                    if (i0 >= verts.Length || i1 >= verts.Length || i2 >= verts.Length) continue;
+                    var faceNormal = Vector3.Cross(verts[i1] - verts[i0], verts[i2] - verts[i0]);
+                    normals[i0] += faceNormal;
+                    normals[i1] += faceNormal;
+                    normals[i2] += faceNormal;
+                }
+            }
+            for (int i = 0; i < normals.Length; i++)
+            {
+                float len = normals[i].magnitude;
+                normals[i] = len > 1e-6f ? normals[i] / len : Vector3.up;
+            }
+            return normals;
+        }
+
         private static Vector3 ReadVector3(byte[] data, int offset, VertexAttributeFormat format)
         {
             switch (format)
@@ -875,6 +950,26 @@ namespace UnityRemix
                         HalfToFloat(BitConverter.ToUInt16(data, offset)),
                         HalfToFloat(BitConverter.ToUInt16(data, offset + 2)),
                         HalfToFloat(BitConverter.ToUInt16(data, offset + 4)));
+                case VertexAttributeFormat.SNorm8:
+                    return new Vector3(
+                        (sbyte)data[offset] / 127f,
+                        (sbyte)data[offset + 1] / 127f,
+                        (sbyte)data[offset + 2] / 127f);
+                case VertexAttributeFormat.UNorm8:
+                    return new Vector3(
+                        data[offset] / 255f * 2f - 1f,
+                        data[offset + 1] / 255f * 2f - 1f,
+                        data[offset + 2] / 255f * 2f - 1f);
+                case VertexAttributeFormat.SNorm16:
+                    return new Vector3(
+                        BitConverter.ToInt16(data, offset) / 32767f,
+                        BitConverter.ToInt16(data, offset + 2) / 32767f,
+                        BitConverter.ToInt16(data, offset + 4) / 32767f);
+                case VertexAttributeFormat.UNorm16:
+                    return new Vector3(
+                        BitConverter.ToUInt16(data, offset) / 65535f * 2f - 1f,
+                        BitConverter.ToUInt16(data, offset + 2) / 65535f * 2f - 1f,
+                        BitConverter.ToUInt16(data, offset + 4) / 65535f * 2f - 1f);
                 default:
                     return Vector3.zero;
             }
@@ -892,6 +987,22 @@ namespace UnityRemix
                     return new Vector2(
                         HalfToFloat(BitConverter.ToUInt16(data, offset)),
                         HalfToFloat(BitConverter.ToUInt16(data, offset + 2)));
+                case VertexAttributeFormat.SNorm8:
+                    return new Vector2(
+                        (sbyte)data[offset] / 127f,
+                        (sbyte)data[offset + 1] / 127f);
+                case VertexAttributeFormat.UNorm8:
+                    return new Vector2(
+                        data[offset] / 255f,
+                        data[offset + 1] / 255f);
+                case VertexAttributeFormat.SNorm16:
+                    return new Vector2(
+                        BitConverter.ToInt16(data, offset) / 32767f,
+                        BitConverter.ToInt16(data, offset + 2) / 32767f);
+                case VertexAttributeFormat.UNorm16:
+                    return new Vector2(
+                        BitConverter.ToUInt16(data, offset) / 65535f,
+                        BitConverter.ToUInt16(data, offset + 2) / 65535f);
                 default:
                     return Vector2.zero;
             }
