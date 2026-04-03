@@ -75,6 +75,7 @@ namespace UnityRemix
             public ulong emissiveTextureHash;
             public Color emissiveColor;    // HDR emission color (can exceed 1.0)
             public float emissiveIntensity;
+            public bool useEmissiveBlend;  // Use kAlphaEmissive blend instead of kAlpha
         }
         private Dictionary<int, MaterialTextureData> materialTextureData = new Dictionary<int, MaterialTextureData>();
         private HashSet<string> loggedShaderProperties = new HashSet<string>();
@@ -323,13 +324,19 @@ namespace UnityRemix
                     logger.LogInfo(sb.ToString());
             }
             
-            // Upload emission — support both Standard (_EmissionColor/_EmissionMap/_EMISSION keyword)
-            // and ULTRAKILL/Master (_EmissiveColor/_EmissiveTex/_EmissiveIntensity/EMISSIVE toggle)
+            // Upload emission — three shader paths:
+            // 1. Standard/URP: _EMISSION keyword gates emission; _EmissionColor + _EmissionMap
+            // 2. ULTRAKILL/Master: _EmissiveColor + _EmissiveTex + _EmissiveIntensity + EMISSIVE toggle
+            // 3. Generic custom: _EmissionColor + _EmissionMultiplier (e.g. Dark Machine/SHDR_Base)
             bool hasEmission = false;
             if (captureTextures.Value)
             {
-                // Standard shader path
-                if (material.IsKeywordEnabled("_EMISSION") || material.HasProperty("_EmissionColor") || material.HasProperty("_EmissionMap"))
+                // Standard shader path — require _EMISSION keyword or an actual _EmissionMap texture.
+                // HasProperty("_EmissionColor") alone is NOT sufficient: most shaders define it
+                // even when emission is disabled, often with a default white value that would
+                // cause every surface to glow.
+                bool hasActiveEmissionMap = material.HasProperty("_EmissionMap") && material.GetTexture("_EmissionMap") != null;
+                if (material.IsKeywordEnabled("_EMISSION") || hasActiveEmissionMap)
                 {
                     if (material.HasProperty("_EmissionColor"))
                     {
@@ -340,7 +347,7 @@ namespace UnityRemix
                         // would double it. The HDR brightness lives in the color, not the intensity.
                         matData.emissiveIntensity = maxChannel > 0f ? 1.0f : 0f;
                     }
-                    if (material.HasProperty("_EmissionMap"))
+                    if (hasActiveEmissionMap)
                     {
                         var emTex = material.GetTexture("_EmissionMap") as Texture2D;
                         if (emTex != null)
@@ -418,11 +425,76 @@ namespace UnityRemix
                     }
                 }
                 
-                if (hasEmission)
+                // Generic custom shader path: _EmissionMultiplier + _Emission texture (e.g. Dark Machine/SHDR_Base)
+                // Requires an actual texture — the multiplier alone with default _EmissionColor is not
+                // a reliable gate since many shaders default _EmissionMultiplier to 1.0.
+                if (!hasEmission && material.HasProperty("_EmissionMultiplier") && material.HasProperty("_Emission"))
                 {
-                    if (verboseTextureLogging.Value)
-                        logger.LogInfo($"[Emission] '{material.name}': color=({matData.emissiveColor.r:F3},{matData.emissiveColor.g:F3},{matData.emissiveColor.b:F3}) " +
-                            $"intensity={matData.emissiveIntensity:F3} texHash=0x{matData.emissiveTextureHash:X16}");
+                    var emTex = material.GetTexture("_Emission") as Texture2D;
+                    float multiplier = material.GetFloat("_EmissionMultiplier");
+                    if (emTex != null && multiplier > 0f)
+                    {
+                        matData.emissiveColor = material.HasProperty("_EmissionColor")
+                            ? material.GetColor("_EmissionColor")
+                            : Color.white;
+                        matData.emissiveIntensity = multiplier;
+                        
+                        var (emHandle, emHash) = UploadTintedEmissiveTexture(emTex, matData.emissiveColor);
+                        matData.emissiveHandle = emHandle;
+                        matData.emissiveTextureHash = emHash;
+                        
+                        hasEmission = true;
+                    }
+                }
+                
+                // TextMeshPro Distance Field: self-lit UI text — use _FaceColor as emissive tint.
+                // SDF atlases are typically Alpha8 format: after GPU readback the glyph shapes
+                // live in the alpha channel while RGB is black. We must convert alpha → RGB
+                // so Remix sees bright glyph pixels in the emissive texture.
+                // The albedo from Alpha8 readback is (0,0,0,A), so reflected light contributes
+                // nothing — emission is the only light source for these glyphs. Use a high
+                // intensity so text appears clearly self-lit in the path-traced scene.
+                if (!hasEmission && shaderName.Contains("TextMeshPro/Distance Field"))
+                {
+                    Color faceColor = material.HasProperty("_FaceColor")
+                        ? material.GetColor("_FaceColor")
+                        : Color.white;
+                    float maxCh = Mathf.Max(faceColor.r, Mathf.Max(faceColor.g, faceColor.b));
+                    if (maxCh > 0f && albedoTex != null)
+                    {
+                        var (emHandle, emHash) = UploadSDFEmissiveTexture(albedoTex, faceColor);
+                        if (emHandle != IntPtr.Zero)
+                        {
+                            matData.emissiveColor = faceColor;
+                            matData.emissiveIntensity = 20.0f;
+                            matData.emissiveHandle = emHandle;
+                            matData.emissiveTextureHash = emHash;
+                            hasEmission = true;
+                            
+                            // Also replace albedo with the alpha→RGB texture so glyphs
+                            // are directly visible, not just in reflections. The original
+                            // Alpha8 readback produces (0,0,0,A) which renders as
+                            // transparent black in direct view.
+                            matData.albedoHandle = emHandle;
+                            matData.albedoTextureHash = emHash;
+                            matData.useEmissiveBlend = true;
+                        }
+                    }
+                }
+                
+                // Safety net: if no path confirmed real emission, ensure emissive state is clean.
+                // Prevents stale values from a path that read properties but decided not to emit.
+                if (!hasEmission)
+                {
+                    matData.emissiveColor = Color.black;
+                    matData.emissiveIntensity = 0f;
+                    matData.emissiveHandle = IntPtr.Zero;
+                    matData.emissiveTextureHash = 0;
+                }
+                else if (verboseTextureLogging.Value)
+                {
+                    logger.LogInfo($"[Emission] '{material.name}': color=({matData.emissiveColor.r:F3},{matData.emissiveColor.g:F3},{matData.emissiveColor.b:F3}) " +
+                        $"intensity={matData.emissiveIntensity:F3} texHash=0x{matData.emissiveTextureHash:X16}");
                 }
             }
             
@@ -762,6 +834,112 @@ namespace UnityRemix
         }
         
         /// <summary>
+        /// Upload an SDF atlas as an emissive texture by converting alpha → tinted RGB.
+        /// Alpha8 SDF atlases blit to RGBA as (0,0,0,glyph), so the standard upload
+        /// produces a black RGB texture. This method reads the alpha channel and writes
+        /// it into RGB multiplied by the given tint color.
+        /// </summary>
+        private (IntPtr handle, ulong hash) UploadSDFEmissiveTexture(Texture2D tex, Color tint)
+        {
+            if (tex == null || createTextureFunc == null)
+                return (IntPtr.Zero, 0);
+            
+            // Cache key: texture ID ^ tint color hash, shifted to avoid collision with tinted emissive cache
+            byte tR = (byte)(Mathf.Clamp01(tint.r) * 255f);
+            byte tG = (byte)(Mathf.Clamp01(tint.g) * 255f);
+            byte tB = (byte)(Mathf.Clamp01(tint.b) * 255f);
+            int tintKey = (tR << 16) | (tG << 8) | tB;
+            long cacheKey = ~((long)tex.GetInstanceID() << 24) ^ (uint)tintKey; // bitwise NOT to separate from tinted cache
+            
+            if (tintedTextureCache.TryGetValue(cacheKey, out var cached))
+                return cached;
+            
+            try
+            {
+                Color32[] pixels;
+                if (tex.isReadable)
+                {
+                    pixels = tex.GetPixels32();
+                }
+                else
+                {
+                    RenderTexture tmp = RenderTexture.GetTemporary(
+                        tex.width, tex.height, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
+                    RenderTexture prev = RenderTexture.active;
+                    Graphics.Blit(tex, tmp);
+                    RenderTexture.active = tmp;
+                    Texture2D readable = new Texture2D(tex.width, tex.height, TextureFormat.RGBA32, false);
+                    readable.ReadPixels(new Rect(0, 0, tmp.width, tmp.height), 0, 0);
+                    readable.Apply();
+                    RenderTexture.active = prev;
+                    RenderTexture.ReleaseTemporary(tmp);
+                    pixels = readable.GetPixels32();
+                    UnityEngine.Object.Destroy(readable);
+                }
+                
+                // Convert: use max(r, g, b, a) as luminance to handle both Alpha8 (RGB=0, A=glyph)
+                // and RGBA atlases. Multiply by tint color.
+                byte[] pixelData = new byte[pixels.Length * 4];
+                for (int i = 0; i < pixels.Length; i++)
+                {
+                    byte lum = (byte)Mathf.Max(pixels[i].r, Mathf.Max(pixels[i].g, Mathf.Max(pixels[i].b, pixels[i].a)));
+                    pixelData[i * 4 + 0] = (byte)((lum * tR) / 255);
+                    pixelData[i * 4 + 1] = (byte)((lum * tG) / 255);
+                    pixelData[i * 4 + 2] = (byte)((lum * tB) / 255);
+                    pixelData[i * 4 + 3] = lum; // alpha = glyph shape for blending
+                }
+                
+                ulong hash = XXHash64.ComputeHash(pixelData, 0, pixelData.Length);
+                if (hash == 0) hash = 1;
+                
+                if (verboseTextureLogging.Value)
+                    logger.LogInfo($"Computed SDF emissive hash for '{tex.name}' tint=({tR},{tG},{tB}): 0x{hash:X16}");
+                
+                GCHandle pinned = GCHandle.Alloc(pixelData, GCHandleType.Pinned);
+                try
+                {
+                    var info = new RemixAPI.remixapi_TextureInfo
+                    {
+                        sType = RemixAPI.remixapi_StructType.REMIXAPI_STRUCT_TYPE_TEXTURE_INFO,
+                        pNext = IntPtr.Zero,
+                        hash = hash,
+                        width = (uint)tex.width,
+                        height = (uint)tex.height,
+                        depth = 1,
+                        mipLevels = 1,
+                        format = RemixAPI.remixapi_Format.REMIXAPI_FORMAT_R8G8B8A8_SRGB,
+                        data = pinned.AddrOfPinnedObject(),
+                        dataSize = (ulong)pixelData.Length
+                    };
+                    
+                    IntPtr texHandle;
+                    RemixAPI.remixapi_ErrorCode result;
+                    lock (apiLock) { result = createTextureFunc(ref info, out texHandle); }
+                    
+                    if (result != RemixAPI.remixapi_ErrorCode.REMIXAPI_ERROR_CODE_SUCCESS)
+                    {
+                        logger.LogError($"Failed to upload SDF emissive '{tex.name}': {result}");
+                        return (IntPtr.Zero, 0);
+                    }
+                    
+                    if (verboseTextureLogging.Value)
+                        logger.LogInfo($"Successfully uploaded SDF emissive '{tex.name}' with handle: 0x{texHandle.ToInt64():X}");
+                    tintedTextureCache[cacheKey] = (texHandle, hash);
+                    return (texHandle, hash);
+                }
+                finally
+                {
+                    pinned.Free();
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogError($"Exception uploading SDF emissive '{tex.name}': {ex.Message}");
+                return (IntPtr.Zero, 0);
+            }
+        }
+        
+        /// <summary>
         /// Get texture hash string from handle (for material creation)
         /// Remix expects the hash that was used when uploading the texture
         /// </summary>
@@ -985,9 +1163,11 @@ namespace UnityRemix
                         opaqueExt.alphaReferenceValue = (byte)(Mathf.Clamp01(matData.alphaCutoff) * 255f);
                         break;
                     case AlphaMode.Blend:
-                        // Enable alpha blending (kAlpha = 0)
                         opaqueExt.blendType_hasvalue = 1; // remixapi_Bool.True
-                        opaqueExt.blendType_value = 0;    // kAlpha
+                        // kAlphaEmissive (1) makes the surface directly visible as a
+                        // glowing blended surface; kAlpha (0) only contributes light
+                        // bounces which makes emissive blended geometry invisible.
+                        opaqueExt.blendType_value = matData.useEmissiveBlend ? 1 : 0;
                         break;
                 }
                 
