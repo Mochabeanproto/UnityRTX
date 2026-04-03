@@ -176,11 +176,22 @@ namespace UnityRemix
 
         /// <summary>
         /// Called on the render thread each frame. Drains a batch from the queue
-        /// and returns the visibility-filtered snapshot built by UpdateVisibility().
+        /// and returns instances. When scanActiveOnly is false, returns currentInstances
+        /// directly (original behavior). Otherwise returns the visibility-filtered
+        /// snapshot built by UpdateVisibility().
         /// </summary>
         public InstanceData[] GetInstances()
         {
             DrainStreamingBatch();
+
+            if (!scanActiveOnly)
+            {
+                lock (instanceLock)
+                {
+                    return currentInstances.Count > 0 ? currentInstances.ToArray() : null;
+                }
+            }
+
             return Volatile.Read(ref visibleInstances);
         }
 
@@ -196,6 +207,12 @@ namespace UnityRemix
                 if (currentInstances.Count == 0)
                 {
                     Volatile.Write(ref visibleInstances, null);
+                    return;
+                }
+
+                if (!scanActiveOnly)
+                {
+                    Volatile.Write(ref visibleInstances, currentInstances.ToArray());
                     return;
                 }
 

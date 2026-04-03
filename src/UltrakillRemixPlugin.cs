@@ -168,7 +168,7 @@ namespace UnityRemix
             configEnableSceneScan = Config.Bind("SceneScan", "EnableSceneScan", true,
                 "Enable runtime scene scanning to find all static level geometry (including inactive objects). No external bake tool needed.");
 
-            configSceneScanActiveOnly = Config.Bind("SceneScan", "ActiveRenderersOnly", true,
+            configSceneScanActiveOnly = Config.Bind("SceneScan", "ActiveRenderersOnly", false,
                 "Only scan and draw renderers that are currently active. Prevents ghost geometry from inactive scene variants (e.g. The Stanley Parable). Disable for games where inactive geometry should remain visible.");
 
             configPersistDisabledRenderers = Config.Bind("Rendering", "PersistDisabledRenderers", false,
