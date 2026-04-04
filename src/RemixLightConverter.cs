@@ -26,6 +26,8 @@ namespace UnityRemix
         // Cache for Unity lights - maps Light instance ID to Remix handle
         private Dictionary<int, IntPtr> lightCache = new Dictionary<int, IntPtr>();
         private List<Light> cachedLights = new List<Light>();
+
+        public int CachedLightCount => cachedLights.Count;
         
         public RemixLightConverter(
             ManualLogSource logger,

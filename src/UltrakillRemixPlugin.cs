@@ -62,6 +62,7 @@ namespace UnityRemix
         private TextureCategoryManager textureCategoryManager;
         private SceneMeshScanner sceneMeshScanner;
         private RemixSettingsUI settingsUI;
+        private RemixDebugHUD debugHUD;
         
         private int frameCount = 0;
         private static bool isQuitting = false;
@@ -367,6 +368,13 @@ namespace UnityRemix
                 settingsUI = new RemixSettingsUI(LogSource, this);
                 RemixImGui.RegisterDrawCallback(new RemixImGui.DrawCallback(settingsUI.Draw));
                 LogSource.LogInfo("ImGui settings overlay registered");
+
+                // Register always-on debug HUD overlay
+                debugHUD = new RemixDebugHUD(LogSource, this);
+                if (RemixImGui.RegisterOverlayCallback(new RemixImGui.DrawCallback(debugHUD.Draw)))
+                    LogSource.LogInfo("Debug HUD overlay registered (toggle with F3)");
+                else
+                    LogSource.LogWarning("Remix build does not support overlay callbacks — debug HUD unavailable");
             }
             
             LogSource.LogInfo("All components initialized");
@@ -416,7 +424,8 @@ namespace UnityRemix
         void Update()
         {
             frameCount++;
-            
+
+
             // Device registration happens via InvokeRepeating in TryRegisterDevice
             
             // Rescan for async-loaded meshes (Addressables, etc.)
@@ -477,6 +486,9 @@ namespace UnityRemix
                 // Send to render thread (mesh creation moved to render thread to avoid deadlocks)
                 renderThread.UpdateFrameState(nextState);
             }
+
+            // Update debug HUD snapshot after all frame data is captured
+            debugHUD?.UpdateSnapshot();
         }
         
         void OnDestroy()
@@ -512,6 +524,7 @@ namespace UnityRemix
             
             // Unregister ImGui callback
             RemixImGui.UnregisterDrawCallback();
+            RemixImGui.UnregisterOverlayCallback();
             
             // Stop render thread
             renderThread?.Stop();
@@ -634,6 +647,12 @@ namespace UnityRemix
         public RemixFrameCapture FrameCapture => frameCapture;
 
         public SceneMeshScanner SceneMeshScanner => sceneMeshScanner;
+
+        public RemixMeshConverter MeshConverter => meshConverter;
+
+        public RemixMaterialManager MaterialManager => materialManager;
+
+        public RemixLightConverter LightConverter => lightConverter;
 
         #endregion
     }

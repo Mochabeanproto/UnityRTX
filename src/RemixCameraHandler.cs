@@ -29,6 +29,7 @@ namespace UnityRemix
         private CameraSnapshot[] _cameraSnapshots = Array.Empty<CameraSnapshot>();
         
         public Camera CurrentCamera => currentCamera;
+        public string ActiveCameraName => lastCameraName;
         
         /// <summary>
         /// Immutable snapshot of a Unity camera's properties, safe to read from any thread.

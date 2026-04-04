@@ -921,6 +921,15 @@ namespace UnityRemix
         /// Expose DrawInstance delegate for external callers (e.g. SceneMeshScanner).
         /// </summary>
         public RemixAPI.PFN_remixapi_DrawInstance GetDrawInstanceFunc() => drawInstanceFunc;
+
+        // --- Diagnostic getters for debug HUD ---
+        public int MeshCacheCount => meshCache.Count;
+        public int SkinnedMeshHandleCount => skinnedMeshHandles.Count;
+
+        public bool TryGetMaterialId(int meshId, out int materialId)
+        {
+            return meshToMaterialMap.TryGetValue(meshId, out materialId);
+        }
         
         /// <summary>
         /// Cleanup all resources

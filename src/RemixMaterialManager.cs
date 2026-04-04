@@ -64,6 +64,9 @@ namespace UnityRemix
         
         // Cache for materials - maps Unity material instance ID to Remix material handle
         private Dictionary<int, IntPtr> materialCache = new Dictionary<int, IntPtr>();
+
+        // Track materials that fell back to the debug placeholder texture (no albedo)
+        private readonly HashSet<string> placeholderMaterialNames = new HashSet<string>();
         
         // Cache for tinted emissive textures - maps (texId ^ tintColorKey) to (handle, hash)
         private Dictionary<long, (IntPtr handle, ulong hash)> tintedTextureCache = new Dictionary<long, (IntPtr, ulong)>();
@@ -1235,7 +1238,11 @@ namespace UnityRemix
                 {
                     EnsureDebugTexture();
                     if (debugTextureHandle != IntPtr.Zero)
+                    {
                         albedoPath = DebugTextureHashPath;
+                        lock (placeholderMaterialNames)
+                            placeholderMaterialNames.Add(matData.materialName ?? $"mat_{materialId}");
+                    }
                 }
 
                 string emissivePath = GetTexturePathFromHandle(matData.emissiveHandle);
@@ -1451,6 +1458,21 @@ namespace UnityRemix
                 }
             }
             textureCache.Clear();
+        }
+
+        // --- Diagnostic getters for debug HUD ---
+        public int TextureCacheCount => textureCache.Count;
+        public int MaterialDataCount => materialTextureData.Count;
+
+        /// <summary>
+        /// Returns a snapshot of material names that fell back to the debug placeholder texture.
+        /// </summary>
+        public string[] GetPlaceholderMaterialNames()
+        {
+            lock (placeholderMaterialNames)
+                return placeholderMaterialNames.Count > 0
+                    ? new List<string>(placeholderMaterialNames).ToArray()
+                    : Array.Empty<string>();
         }
     }
 }

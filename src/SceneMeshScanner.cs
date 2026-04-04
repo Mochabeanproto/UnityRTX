@@ -87,6 +87,51 @@ namespace UnityRemix
 
         public bool IsStreaming => streamingActive;
 
+        public int TotalInstanceCount
+        {
+            get { lock (instanceLock) { return currentInstances.Count; } }
+        }
+
+        public int StreamingQueueCount
+        {
+            get { lock (streamLock) { return streamingQueue.Count; } }
+        }
+
+        /// <summary>
+        /// Collect per-instance debug entries for 3D box overlay. Called on main thread only when HUD is visible.
+        /// </summary>
+        public List<RemixFrameCapture.DebugMeshEntry> CollectDebugEntries()
+        {
+            lock (instanceLock)
+            {
+                var entries = new List<RemixFrameCapture.DebugMeshEntry>(currentInstances.Count);
+                for (int i = 0; i < currentInstances.Count; i++)
+                {
+                    if (i >= instanceRenderers.Count) break;
+                    var r = instanceRenderers[i];
+                    if (r == null) continue;
+                    if (!r.enabled || !r.gameObject.activeInHierarchy) continue;
+
+                    var mf = r.GetComponent<MeshFilter>();
+                    entries.Add(new RemixFrameCapture.DebugMeshEntry
+                    {
+                        Name = r.gameObject.name,
+                        MeshName = mf != null && mf.sharedMesh != null ? mf.sharedMesh.name : "",
+                        MeshId = mf != null && mf.sharedMesh != null ? mf.sharedMesh.GetInstanceID() : 0,
+                        LayerIndex = r.gameObject.layer,
+                        RendererInstanceId = r.GetInstanceID(),
+                        LayerName = LayerMask.LayerToName(r.gameObject.layer),
+                        Origin = "Scanner",
+                        BoundsCenter = r.bounds.center,
+                        BoundsExtents = r.bounds.extents,
+                        MaterialName = r.sharedMaterial != null ? r.sharedMaterial.name : "(null)",
+                        NoTexture = r.sharedMaterial == null,
+                    });
+                }
+                return entries;
+            }
+        }
+
         /// <summary>
         /// Returns the set of layer indices that have scanned instances.
         /// </summary>

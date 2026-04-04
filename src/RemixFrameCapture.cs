@@ -172,6 +172,148 @@ namespace UnityRemix
         private Queue<MeshToCreate> meshesToCreate = new Queue<MeshToCreate>();
         private HashSet<int> meshesInQueue = new HashSet<int>(); // Track which meshes are already queued
         private HashSet<int> failedMeshIds = new HashSet<int>(); // Meshes that failed creation (non-readable)
+
+        // --- Diagnostic getters for debug HUD ---
+        public int FailedMeshCount => failedMeshIds.Count;
+        public int PendingMeshQueueCount => meshesToCreate.Count;
+        public int PersistentStaticCount => persistentStaticInstances.Count;
+        public int CachedStaticRendererCount => cachedRenderers.Count;
+        public int CachedSkinnedRendererCount => cachedSkinnedRenderers.Count;
+
+        /// <summary>
+        /// Debug entry for per-mesh 3D box overlay. Collected on main thread only when HUD is visible.
+        /// </summary>
+        public struct DebugMeshEntry
+        {
+            public string Name;
+            public string MeshName;
+            public int MeshId;
+            public int LayerIndex;
+            public int RendererInstanceId;
+            public string LayerName;
+            public string Origin;       // "Runtime", "Skinned", "Scanner", "Persistent"
+            public string MaterialName;
+            public ulong TextureHash;
+            public bool Failed;
+            public bool NoTexture;
+            public Vector3 BoundsCenter;
+            public Vector3 BoundsExtents;
+        }
+
+        /// <summary>
+        /// Collect per-mesh debug entries from cached renderers. Only call when debug HUD is visible.
+        /// </summary>
+        public List<DebugMeshEntry> CollectDebugMeshEntries()
+        {
+            var entries = new List<DebugMeshEntry>(cachedRenderers.Count + cachedSkinnedRenderers.Count);
+
+            // Static renderers (runtime capture path)
+            for (int i = 0; i < cachedRenderers.Count; i++)
+            {
+                var r = cachedRenderers[i];
+                if (r == null) continue;
+                if (!r.enabled || !r.gameObject.activeInHierarchy) continue;
+
+                var mf = r.GetComponent<MeshFilter>();
+                if (mf == null || mf.sharedMesh == null) continue;
+
+                int meshId = mf.sharedMesh.GetInstanceID();
+                bool failed = failedMeshIds.Contains(meshId);
+                bool cached = meshConverter.IsMeshCached(meshId);
+                if (!failed && !cached) continue; // still queued, not interesting yet
+
+                var entry = new DebugMeshEntry
+                {
+                    Name = r.gameObject.name,
+                    MeshName = mf.sharedMesh.name,
+                    MeshId = meshId,
+                    LayerIndex = r.gameObject.layer,
+                    RendererInstanceId = r.GetInstanceID(),
+                    LayerName = LayerMask.LayerToName(r.gameObject.layer),
+                    Origin = "Runtime",
+                    Failed = failed,
+                    BoundsCenter = r.bounds.center,
+                    BoundsExtents = r.bounds.extents,
+                };
+
+                // Resolve material/texture info
+                ResolveMaterialInfo(ref entry, r.sharedMaterial);
+                entries.Add(entry);
+            }
+
+            // Skinned renderers
+            for (int i = 0; i < cachedSkinnedRenderers.Count; i++)
+            {
+                var sr = cachedSkinnedRenderers[i];
+                if (sr == null) continue;
+                if (!sr.enabled || !sr.gameObject.activeInHierarchy) continue;
+                if (sr.sharedMesh == null) continue;
+
+                var entry = new DebugMeshEntry
+                {
+                    Name = sr.gameObject.name,
+                    MeshName = sr.sharedMesh.name,
+                    MeshId = sr.sharedMesh.GetInstanceID(),
+                    LayerIndex = sr.gameObject.layer,
+                    RendererInstanceId = sr.GetInstanceID(),
+                    LayerName = LayerMask.LayerToName(sr.gameObject.layer),
+                    Origin = "Skinned",
+                    BoundsCenter = sr.bounds.center,
+                    BoundsExtents = sr.bounds.extents,
+                };
+
+                ResolveMaterialInfo(ref entry, sr.sharedMaterial);
+                entries.Add(entry);
+            }
+
+            // Persistent disabled renderers
+            foreach (var kv in persistentStaticInstances)
+            {
+                var p = kv.Value;
+                if (p.renderer == null) continue;
+                if (p.renderer.enabled && p.renderer.gameObject.activeInHierarchy) continue;
+
+                var entry = new DebugMeshEntry
+                {
+                    Name = p.renderer.gameObject.name,
+                    MeshName = "",
+                    MeshId = p.meshId,
+                    LayerIndex = p.renderer.gameObject.layer,
+                    RendererInstanceId = p.renderer.GetInstanceID(),
+                    LayerName = LayerMask.LayerToName(p.renderer.gameObject.layer),
+                    Origin = "Persistent",
+                    BoundsCenter = p.renderer.bounds.center,
+                    BoundsExtents = p.renderer.bounds.extents,
+                };
+
+                ResolveMaterialInfo(ref entry, p.renderer.sharedMaterial);
+                entries.Add(entry);
+            }
+
+            return entries;
+        }
+
+        private void ResolveMaterialInfo(ref DebugMeshEntry entry, Material mat)
+        {
+            if (mat == null)
+            {
+                entry.MaterialName = "(null)";
+                entry.NoTexture = true;
+                return;
+            }
+
+            entry.MaterialName = mat.name;
+            int matId = mat.GetInstanceID();
+            if (materialManager != null && materialManager.TryGetMaterialData(matId, out var matData))
+            {
+                entry.TextureHash = matData.albedoTextureHash;
+                entry.NoTexture = matData.albedoHandle == IntPtr.Zero;
+            }
+            else
+            {
+                entry.NoTexture = true;
+            }
+        }
         
         private int skinnedCaptureCount = 0;
         private int staticCaptureCount = 0;

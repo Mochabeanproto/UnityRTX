@@ -132,12 +132,26 @@ namespace UnityRemix
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate void D_PlotPlotBars([MarshalAs(UnmanagedType.LPStr)] string labelId, float[] values, int count, double barSize);
 
+        // DrawList delegates
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate void D_DrawList_AddLine(float x1, float y1, float x2, float y2, uint col, float thickness);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate void D_DrawList_AddRect(float x1, float y1, float x2, float y2, uint col, float rounding, float thickness);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate void D_DrawList_AddRectFilled(float x1, float y1, float x2, float y2, uint col, float rounding);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate void D_DrawList_AddText(float x, float y, uint col, [MarshalAs(UnmanagedType.LPStr)] string text);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate void D_GetDisplaySize(out float w, out float h);
+
         #endregion
 
         #region Resolved Function Pointers
 
         private static D_RegisterDrawCallback _registerDrawCallback;
         private static D_Void _unregisterDrawCallback;
+        private static D_RegisterDrawCallback _registerOverlayCallback;
+        private static D_Void _unregisterOverlayCallback;
         private static D_Begin _begin;
         private static D_Void _end;
         private static D_BeginChild _beginChild;
@@ -215,6 +229,13 @@ namespace UnityRemix
         private static D_PlotPlotLine _plotPlotLine;
         private static D_PlotPlotBars _plotPlotBars;
 
+        // DrawList
+        private static D_DrawList_AddLine _drawListAddLine;
+        private static D_DrawList_AddRect _drawListAddRect;
+        private static D_DrawList_AddRectFilled _drawListAddRectFilled;
+        private static D_DrawList_AddText _drawListAddText;
+        private static D_GetDisplaySize _getDisplaySize;
+
         // TableNextColumn returns int — need separate delegate
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate int D_TableNextColumn_Ret();
@@ -250,6 +271,8 @@ namespace UnityRemix
             // Core — must resolve
             _registerDrawCallback = Resolve<D_RegisterDrawCallback>("remixapi_imgui_RegisterDrawCallback");
             _unregisterDrawCallback = Resolve<D_Void>("remixapi_imgui_UnregisterDrawCallback");
+            _registerOverlayCallback = Resolve<D_RegisterDrawCallback>("remixapi_imgui_RegisterOverlayCallback");
+            _unregisterOverlayCallback = Resolve<D_Void>("remixapi_imgui_UnregisterOverlayCallback");
             _begin = Resolve<D_Begin>("remixapi_imgui_Begin");
             _end = Resolve<D_Void>("remixapi_imgui_End");
 
@@ -336,8 +359,19 @@ namespace UnityRemix
             _plotPlotLine = Resolve<D_PlotPlotLine>("remixapi_imgui_PlotPlotLine");
             _plotPlotBars = Resolve<D_PlotPlotBars>("remixapi_imgui_PlotPlotBars");
 
+            // DrawList (non-critical — graceful fallback if old d3d9.dll)
+            _drawListAddLine = Resolve<D_DrawList_AddLine>("remixapi_imgui_DrawList_AddLine");
+            _drawListAddRect = Resolve<D_DrawList_AddRect>("remixapi_imgui_DrawList_AddRect");
+            _drawListAddRectFilled = Resolve<D_DrawList_AddRectFilled>("remixapi_imgui_DrawList_AddRectFilled");
+            _drawListAddText = Resolve<D_DrawList_AddText>("remixapi_imgui_DrawList_AddText");
+            _getDisplaySize = Resolve<D_GetDisplaySize>("remixapi_imgui_GetDisplaySize");
+
             _initialized = true;
             log.LogInfo("[RemixImGui] Initialized — all core exports resolved");
+            if (HasDrawListSupport)
+                log.LogInfo("[RemixImGui] DrawList exports resolved — 3D debug overlay available");
+            else
+                log.LogWarning("[RemixImGui] DrawList exports NOT found — 3D debug boxes disabled (old d3d9.dll?)");
             return true;
         }
 
@@ -359,6 +393,31 @@ namespace UnityRemix
             _unregisterDrawCallback();
             _registeredCallback = null;
         }
+
+        /// <summary>
+        /// Register an overlay callback invoked every frame regardless of developer menu state.
+        /// Returns false if the Remix build does not support overlay callbacks.
+        /// </summary>
+        public static bool RegisterOverlayCallback(DrawCallback callback)
+        {
+            if (!_initialized || _registerOverlayCallback == null) return false;
+            _registeredOverlayCallback = callback;
+            IntPtr fnPtr = Marshal.GetFunctionPointerForDelegate(callback);
+            _registerOverlayCallback(fnPtr, IntPtr.Zero);
+            return true;
+        }
+
+        public static void UnregisterOverlayCallback()
+        {
+            if (!_initialized || _unregisterOverlayCallback == null) return;
+            _unregisterOverlayCallback();
+            _registeredOverlayCallback = null;
+        }
+
+        public static bool HasOverlaySupport => _registerOverlayCallback != null;
+
+        // prevent GC of overlay delegate
+        private static DrawCallback _registeredOverlayCallback;
 
         #region Public API — Windows
 
@@ -545,6 +604,40 @@ namespace UnityRemix
         public static void PlotEndPlot() => _plotEndPlot?.Invoke();
         public static void PlotPlotLine(string labelId, float[] values) => _plotPlotLine?.Invoke(labelId, values, values?.Length ?? 0);
         public static void PlotPlotBars(string labelId, float[] values, double barSize = 0.67) => _plotPlotBars?.Invoke(labelId, values, values?.Length ?? 0, barSize);
+
+        #endregion
+
+        #region Public API — DrawList (ForegroundDrawList screen-space primitives)
+
+        public static bool HasDrawListSupport => _drawListAddLine != null;
+
+        public static void DrawList_AddLine(float x1, float y1, float x2, float y2, uint col, float thickness = 1.0f)
+            => _drawListAddLine?.Invoke(x1, y1, x2, y2, col, thickness);
+
+        public static void DrawList_AddRect(float x1, float y1, float x2, float y2, uint col, float rounding = 0, float thickness = 1.0f)
+            => _drawListAddRect?.Invoke(x1, y1, x2, y2, col, rounding, thickness);
+
+        public static void DrawList_AddRectFilled(float x1, float y1, float x2, float y2, uint col, float rounding = 0)
+            => _drawListAddRectFilled?.Invoke(x1, y1, x2, y2, col, rounding);
+
+        public static void DrawList_AddText(float x, float y, uint col, string text)
+            => _drawListAddText?.Invoke(x, y, col, text);
+
+        public static void GetDisplaySize(out float w, out float h)
+        {
+            if (_getDisplaySize != null) { _getDisplaySize(out w, out h); }
+            else { w = 1920; h = 1080; }
+        }
+
+        /// <summary>Pack RGBA floats (0-1) into ImGui's packed uint32 (ABGR byte order).</summary>
+        public static uint ImColor(float r, float g, float b, float a = 1.0f)
+        {
+            byte rb = (byte)(Math.Max(0f, Math.Min(1f, r)) * 255f);
+            byte gb = (byte)(Math.Max(0f, Math.Min(1f, g)) * 255f);
+            byte bb = (byte)(Math.Max(0f, Math.Min(1f, b)) * 255f);
+            byte ab = (byte)(Math.Max(0f, Math.Min(1f, a)) * 255f);
+            return (uint)(rb | (gb << 8) | (bb << 16) | (ab << 24));
+        }
 
         #endregion
 
