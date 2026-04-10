@@ -47,6 +47,7 @@ namespace UnityRemix
             public IntPtr MeshHandle;
             public RemixAPI.remixapi_Transform Transform;
             public int Layer;
+            public Vector3 BoundsCenter;
         }
 
         // Streaming: main thread pushes extracted mesh data, render thread drains batches
@@ -221,31 +222,31 @@ namespace UnityRemix
 
         /// <summary>
         /// Called on the render thread each frame. Drains a batch from the queue
-        /// and returns instances. When scanActiveOnly is false, returns currentInstances
-        /// directly (original behavior). Otherwise returns the visibility-filtered
-        /// snapshot built by UpdateVisibility().
+        /// and returns the visibility-filtered snapshot built by UpdateVisibility().
+        /// Falls back to currentInstances if UpdateVisibility hasn't run yet.
         /// </summary>
         public InstanceData[] GetInstances()
         {
             DrainStreamingBatch();
 
-            if (!scanActiveOnly)
-            {
-                lock (instanceLock)
-                {
-                    return currentInstances.Count > 0 ? currentInstances.ToArray() : null;
-                }
-            }
+            var snapshot = Volatile.Read(ref visibleInstances);
+            if (snapshot != null)
+                return snapshot;
 
-            return Volatile.Read(ref visibleInstances);
+            // Fallback: UpdateVisibility hasn't populated visibleInstances yet (e.g. first
+            // frames after drain, before main-thread LateUpdate runs). Return currentInstances
+            // directly so newly streamed geometry isn't invisible for multiple frames.
+            lock (instanceLock)
+            {
+                return currentInstances.Count > 0 ? currentInstances.ToArray() : null;
+            }
         }
 
         /// <summary>
-        /// Must be called on the main thread each frame. Checks which scanned instances
-        /// have an active renderer and builds a filtered snapshot for the render thread.
-        /// This prevents ghost geometry from inactive scene variants.
+        /// Must be called on the main thread each frame. Filters scanned instances by
+        /// active state, distance culling, and visibility culling.
         /// </summary>
-        public void UpdateVisibility()
+        public void UpdateVisibility(Vector3 cameraPosition, bool useDistanceCulling, float maxRenderDistance, bool useVisibilityCulling)
         {
             lock (instanceLock)
             {
@@ -255,24 +256,64 @@ namespace UnityRemix
                     return;
                 }
 
-                if (!scanActiveOnly)
+                bool anyCulling = scanActiveOnly || useDistanceCulling || useVisibilityCulling;
+                if (!anyCulling)
                 {
                     Volatile.Write(ref visibleInstances, currentInstances.ToArray());
                     return;
                 }
 
                 var visible = new List<InstanceData>(currentInstances.Count);
+                float maxDistSqr = maxRenderDistance * maxRenderDistance;
+
                 for (int i = 0; i < currentInstances.Count; i++)
                 {
-                    if (i >= instanceRenderers.Count)
-                        break;
-                    var renderer = instanceRenderers[i];
-                    if (renderer != null && renderer.enabled && renderer.gameObject.activeInHierarchy)
-                        visible.Add(currentInstances[i]);
+                    var instance = currentInstances[i];
+
+                    if (i < instanceRenderers.Count)
+                    {
+                        var renderer = instanceRenderers[i];
+
+                        // Active-only filtering
+                        if (scanActiveOnly)
+                        {
+                            if (renderer == null || !renderer.enabled || !renderer.gameObject.activeInHierarchy)
+                                continue;
+                        }
+
+                        // Visibility culling (only meaningful for active renderers)
+                        if (useVisibilityCulling && renderer != null
+                            && renderer.enabled && renderer.gameObject.activeInHierarchy
+                            && !renderer.isVisible)
+                            continue;
+                    }
+
+                    // Distance culling using pre-computed bounds center
+                    if (useDistanceCulling)
+                    {
+                        float sqrDist = (instance.BoundsCenter - cameraPosition).sqrMagnitude;
+                        if (sqrDist > maxDistSqr)
+                            continue;
+                    }
+
+                    visible.Add(instance);
                 }
 
                 Volatile.Write(ref visibleInstances, visible.Count > 0 ? visible.ToArray() : null);
             }
+        }
+
+        private static Vector3 ComputeBoundsCenter(Vector3[] vertices, Matrix4x4 localToWorld)
+        {
+            if (vertices == null || vertices.Length == 0)
+                return Vector3.zero;
+            Vector3 min = vertices[0], max = vertices[0];
+            for (int i = 1; i < vertices.Length; i++)
+            {
+                min = Vector3.Min(min, vertices[i]);
+                max = Vector3.Max(max, vertices[i]);
+            }
+            return localToWorld.MultiplyPoint3x4((min + max) * 0.5f);
         }
 
         public void ClearData()
@@ -568,7 +609,8 @@ namespace UnityRemix
                 {
                     MeshHandle = meshHandle,
                     Transform = transform,
-                    Layer = entry.Layer
+                    Layer = entry.Layer,
+                    BoundsCenter = ComputeBoundsCenter(entry.Vertices, entry.LocalToWorld)
                 });
                 newRenderers.Add(entry.SourceRenderer);
             }

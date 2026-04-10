@@ -432,8 +432,8 @@ namespace UnityRemix
             if (configEnableSceneScan.Value)
                 sceneMeshScanner?.Update(Time.unscaledDeltaTime);
 
-            // Update visibility of scanned instances (filters out inactive renderers)
-            sceneMeshScanner?.UpdateVisibility();
+            // Visibility filtering for scanned instances is done in UpdateFromPersistent()
+            // after the camera has been resolved by CaptureStaticMeshes
         }
         
         void LateUpdate()
@@ -483,6 +483,18 @@ namespace UnityRemix
                 // Capture skinned meshes
                 frameCapture.CaptureSkinnedMeshes(nextState, frameCount);
                 
+                // Update scene scan visibility with the camera position resolved by CaptureStaticMeshes
+                if (sceneMeshScanner != null)
+                {
+                    Vector3 camPos = nextState.camera.valid ? nextState.camera.position : Vector3.zero;
+                    sceneMeshScanner.UpdateVisibility(
+                        camPos,
+                        configUseDistanceCulling.Value,
+                        configMaxRenderDistance.Value,
+                        configUseVisibilityCulling.Value
+                    );
+                }
+
                 // Send to render thread (mesh creation moved to render thread to avoid deadlocks)
                 renderThread.UpdateFrameState(nextState);
             }

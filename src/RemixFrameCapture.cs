@@ -748,6 +748,16 @@ namespace UnityRemix
                 if (IsLayerDisabled(entry.renderer.gameObject.layer))
                     continue;
                 
+                // Distance culling using stored transform position
+                if (configUseDistanceCulling.Value)
+                {
+                    float maxDist = configMaxRenderDistance.Value;
+                    Vector3 objPos = new Vector3(entry.localToWorld.m03, entry.localToWorld.m13, entry.localToWorld.m23);
+                    float sqrDistance = (objPos - camPos).sqrMagnitude;
+                    if (sqrDistance > maxDist * maxDist)
+                        continue;
+                }
+                
                 // Draw with last-known transform
                 state.instances.Add(new MeshInstanceData
                 {
@@ -842,8 +852,11 @@ namespace UnityRemix
             
             int gpuSkinned = 0;
             int baked = 0;
-            int skipNull = 0, skipLayer = 0, skipVis = 0, skipNoMesh = 0;
+            int skipNull = 0, skipLayer = 0, skipVis = 0, skipDist = 0, skipNoMesh = 0;
             var validSkinnedIds = new HashSet<int>();
+            
+            Camera mainCam = cameraHandler.GetPreferredCamera();
+            Vector3 camPos = mainCam != null ? mainCam.transform.position : Vector3.zero;
             
             // BakeMesh fallback budget
             var bakeSw = System.Diagnostics.Stopwatch.StartNew();
@@ -873,6 +886,17 @@ namespace UnityRemix
                 {
                     skipVis++;
                     continue;
+                }
+                
+                if (configUseDistanceCulling.Value)
+                {
+                    float maxDist = configMaxRenderDistance.Value;
+                    float sqrDistance = (skinned.bounds.center - camPos).sqrMagnitude;
+                    if (sqrDistance > maxDist * maxDist)
+                    {
+                        skipDist++;
+                        continue;
+                    }
                 }
                 
                 if (skinned.sharedMesh == null)
@@ -1027,7 +1051,7 @@ namespace UnityRemix
             if (doLog && total > 0)
             {
                 logger.LogInfo($"CaptureSkinnedMeshes: gpuSkinned={gpuSkinned}, baked={baked}, " +
-                    $"skip(null={skipNull},layer={skipLayer},vis={skipVis},mesh={skipNoMesh}), " +
+                    $"skip(null={skipNull},layer={skipLayer},vis={skipVis},dist={skipDist},mesh={skipNoMesh}), " +
                     $"cached={persistentSkinnedData.Count}, total={total}");
             }
         }
