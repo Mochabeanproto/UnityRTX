@@ -172,10 +172,11 @@ namespace UnityRemix
         private Queue<MeshToCreate> meshesToCreate = new Queue<MeshToCreate>();
         private HashSet<int> meshesInQueue = new HashSet<int>(); // Track which meshes are already queued
         private HashSet<int> failedMeshIds = new HashSet<int>(); // Meshes that failed creation (non-readable)
+        private readonly object meshQueueLock = new object(); // Synchronize main thread enqueue + render thread dequeue
 
         // --- Diagnostic getters for debug HUD ---
-        public int FailedMeshCount => failedMeshIds.Count;
-        public int PendingMeshQueueCount => meshesToCreate.Count;
+        public int FailedMeshCount { get { lock (meshQueueLock) return failedMeshIds.Count; } }
+        public int PendingMeshQueueCount { get { lock (meshQueueLock) return meshesToCreate.Count; } }
         public int PersistentStaticCount => persistentStaticInstances.Count;
         public int CachedStaticRendererCount => cachedRenderers.Count;
         public int CachedSkinnedRendererCount => cachedSkinnedRenderers.Count;
@@ -467,9 +468,12 @@ namespace UnityRemix
             cachedRenderers.Clear();
             cachedSkinnedRenderers.Clear();
             lastSkinnedTransforms.Clear();
-            meshesToCreate.Clear();
-            meshesInQueue.Clear();
-            failedMeshIds.Clear();
+            lock (meshQueueLock)
+            {
+                meshesToCreate.Clear();
+                meshesInQueue.Clear();
+                failedMeshIds.Clear();
+            }
             loggedSkinnedMaterials.Clear();
             skinnedRoundRobinIndex = 0;
             persistentSkinnedData.Clear();
@@ -677,9 +681,15 @@ namespace UnityRemix
                 int meshId = mesh.GetInstanceID();
                 
                 // Queue mesh for creation if not cached, not already queued, and not previously failed
-                if (!meshConverter.IsMeshCached(meshId) && !meshesInQueue.Contains(meshId) && !failedMeshIds.Contains(meshId))
+                bool needsQueue;
+                lock (meshQueueLock)
                 {
-                    // Capture material textures first
+                    needsQueue = !meshConverter.IsMeshCached(meshId) && !meshesInQueue.Contains(meshId) && !failedMeshIds.Contains(meshId);
+                }
+                
+                if (needsQueue)
+                {
+                    // Capture material textures (pixel data gathered here, Remix API deferred to render thread)
                     var material = renderer.sharedMaterial;
                     if (material != null)
                     {
@@ -688,12 +698,15 @@ namespace UnityRemix
                     }
                     
                     // Queue mesh with its material
-                    meshesToCreate.Enqueue(new MeshToCreate
+                    lock (meshQueueLock)
                     {
-                        mesh = mesh,
-                        material = material
-                    });
-                    meshesInQueue.Add(meshId);
+                        meshesToCreate.Enqueue(new MeshToCreate
+                        {
+                            mesh = mesh,
+                            material = material
+                        });
+                        meshesInQueue.Add(meshId);
+                    }
                     
                     continue;
                 }
@@ -783,8 +796,15 @@ namespace UnityRemix
         /// </summary>
         public void ProcessMeshCreationBatch()
         {
+            // Upload any textures queued by the main thread before creating meshes/materials
+            materialManager.ProcessPendingTextureUploads();
+            
             // Adaptive batch size based on queue length
-            int batchSize = meshesToCreate.Count > 100 ? 3 : Math.Min(5, meshesToCreate.Count);
+            int batchSize;
+            lock (meshQueueLock)
+            {
+                batchSize = meshesToCreate.Count > 100 ? 3 : Math.Min(5, meshesToCreate.Count);
+            }
             
             // Frame time budget: max 2ms for mesh creation
             var startTime = System.Diagnostics.Stopwatch.StartNew();
@@ -792,15 +812,21 @@ namespace UnityRemix
             
             for (int i = 0; i < batchSize; i++)
             {
-                if (meshesToCreate.Count == 0) break;
-                
-                var meshData = meshesToCreate.Dequeue();
+                MeshToCreate meshData;
+                lock (meshQueueLock)
+                {
+                    if (meshesToCreate.Count == 0) break;
+                    meshData = meshesToCreate.Dequeue();
+                }
                 if (meshData.mesh == null) continue;
                 
                 int meshId = meshData.mesh.GetInstanceID();
                 
                 // Remove from queue tracking
-                meshesInQueue.Remove(meshId);
+                lock (meshQueueLock)
+                {
+                    meshesInQueue.Remove(meshId);
+                }
                 
                 if (meshConverter.IsMeshCached(meshId))
                     continue;
@@ -814,7 +840,7 @@ namespace UnityRemix
                     {
                         if (configDebugLogInterval.Value > 0)
                             logger.LogWarning($"[MeshFail] Failed to create mesh '{meshData.mesh.name}' readable={meshData.mesh.isReadable} vertCount={meshData.mesh.vertexCount} subMeshCount={meshData.mesh.subMeshCount}");
-                        failedMeshIds.Add(meshId);
+                        lock (meshQueueLock) { failedMeshIds.Add(meshId); }
                     }
                     
                     // Check time budget - break if exceeded
@@ -1085,18 +1111,18 @@ namespace UnityRemix
                         int posOff2 = -1, nrmOff2 = -1, stride2 = 0;
                         if (sharedMesh.HasVertexAttribute(VertexAttribute.Position))
                         {
-                            int s = sharedMesh.GetVertexAttributeStream(VertexAttribute.Position);
+                            int s = MeshCompat.GetVertexAttributeStream(sharedMesh, VertexAttribute.Position);
                             if (s == 0)
                             {
-                                posOff2 = sharedMesh.GetVertexAttributeOffset(VertexAttribute.Position);
-                                stride2 = sharedMesh.GetVertexBufferStride(0);
+                                posOff2 = MeshCompat.GetVertexAttributeOffset(sharedMesh, VertexAttribute.Position);
+                                stride2 = MeshCompat.GetVertexBufferStride(sharedMesh, 0);
                             }
                         }
                         if (sharedMesh.HasVertexAttribute(VertexAttribute.Normal))
                         {
-                            int s = sharedMesh.GetVertexAttributeStream(VertexAttribute.Normal);
+                            int s = MeshCompat.GetVertexAttributeStream(sharedMesh, VertexAttribute.Normal);
                             if (s == 0)
-                                nrmOff2 = sharedMesh.GetVertexAttributeOffset(VertexAttribute.Normal);
+                                nrmOff2 = MeshCompat.GetVertexAttributeOffset(sharedMesh, VertexAttribute.Normal);
                         }
                         bool layoutOk = posOff2 >= 0 && stride2 > 0;
                         cachedTopology[meshId] = new CachedMeshTopology
@@ -1124,19 +1150,19 @@ namespace UnityRemix
                 
                 if (sharedMesh.HasVertexAttribute(VertexAttribute.Position))
                 {
-                    int stream = sharedMesh.GetVertexAttributeStream(VertexAttribute.Position);
+                    int stream = MeshCompat.GetVertexAttributeStream(sharedMesh, VertexAttribute.Position);
                     if (stream == 0) // GPU skinned buffer is always stream 0
                     {
-                        posOffset = sharedMesh.GetVertexAttributeOffset(VertexAttribute.Position);
-                        stride = sharedMesh.GetVertexBufferStride(0);
+                        posOffset = MeshCompat.GetVertexAttributeOffset(sharedMesh, VertexAttribute.Position);
+                        stride = MeshCompat.GetVertexBufferStride(sharedMesh, 0);
                     }
                 }
                 
                 if (sharedMesh.HasVertexAttribute(VertexAttribute.Normal))
                 {
-                    int stream = sharedMesh.GetVertexAttributeStream(VertexAttribute.Normal);
+                    int stream = MeshCompat.GetVertexAttributeStream(sharedMesh, VertexAttribute.Normal);
                     if (stream == 0)
-                        nrmOffset = sharedMesh.GetVertexAttributeOffset(VertexAttribute.Normal);
+                        nrmOffset = MeshCompat.GetVertexAttributeOffset(sharedMesh, VertexAttribute.Normal);
                 }
                 
                 bool topoValid = posOffset >= 0 && stride > 0;
@@ -1417,27 +1443,27 @@ namespace UnityRemix
             {
                 // Ensure vertex buffer is readable — must be set before the GPU skins this renderer,
                 // so we configure it and skip readback this frame (buffer won't exist yet).
+                // Unity 2019 lacks vertexBufferTarget and forceMatrixRecalculationPerRender —
+                // MissingMethodException will be caught and BakeMesh fallback used instead.
                 if (!configuredBufferTargets.Contains(skinnedId))
                 {
                     skinned.vertexBufferTarget |= GraphicsBuffer.Target.Raw;
                     skinned.forceMatrixRecalculationPerRender = true;
                     configuredBufferTargets.Add(skinnedId);
-                    // Always log — only fires once per renderer
                     logger.LogInfo($"  GPU readback: configured vertexBufferTarget for '{skinned.name}' (id={skinnedId}), deferring to next frame");
-                    return false; // fall through to BakeMesh this frame; buffer available next frame
+                    return false;
                 }
                 
                 var buffer = skinned.GetVertexBuffer();
                 if (buffer == null || !buffer.IsValid())
                 {
-                    // Always log — important diagnostic
                     logger.LogInfo($"  GPU readback: GetVertexBuffer() returned {(buffer == null ? "null" : "invalid")} for '{skinned.name}' (id={skinnedId})");
                     buffer?.Dispose();
                     return false;
                 }
                 
                 var request = AsyncGPUReadback.Request(buffer);
-                buffer.Dispose(); // we don't hold the buffer; the request keeps a ref internally
+                buffer.Dispose();
                 
                 pendingReadbacks.Add(new PendingReadback
                 {
@@ -1450,9 +1476,19 @@ namespace UnityRemix
                 
                 return true;
             }
+            catch (MissingMethodException)
+            {
+                // Unity 2019: vertexBufferTarget / GetVertexBuffer / forceMatrixRecalculationPerRender
+                // don't exist. Silently fall through to BakeMesh — log once per renderer.
+                if (!configuredBufferTargets.Contains(skinnedId))
+                {
+                    logger.LogInfo($"  GPU readback: not available for '{skinned.name}' (Unity 2019) — using BakeMesh");
+                    configuredBufferTargets.Add(skinnedId); // prevent repeated log
+                }
+                return false;
+            }
             catch (Exception ex)
             {
-                // Always log — important diagnostic
                 logger.LogWarning($"  GPU readback: exception for '{skinned.name}' (id={skinnedId}): {ex.Message}");
                 return false;
             }

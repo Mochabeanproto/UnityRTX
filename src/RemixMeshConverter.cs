@@ -140,7 +140,16 @@ namespace UnityRemix
             if (mesh == null || createMeshFunc == null)
                 return IntPtr.Zero;
             
-            Vector3[] vertices = mesh.vertices;
+            Vector3[] vertices;
+            try
+            {
+                vertices = mesh.vertices;
+            }
+            catch
+            {
+                // Non-readable mesh (e.g. static-batched combined mesh on Unity 2019)
+                return IntPtr.Zero;
+            }
             Vector3[] normals = mesh.normals;
             Vector2[] uvs = mesh.uv;
             Color32[] colors = mesh.colors32;

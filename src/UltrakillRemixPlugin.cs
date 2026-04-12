@@ -380,6 +380,8 @@ namespace UnityRemix
             LogSource.LogInfo("All components initialized");
         }
         
+        private bool renderThreadStarted = false;
+        
         private void TryRegisterDevice()
         {
             if (deviceRegistered)
@@ -388,18 +390,28 @@ namespace UnityRemix
                 return;
             }
             
-            LogSource.LogInfo("TryRegisterDevice called via InvokeRepeating...");
-            try
+            // Phase 1: start the render thread (once)
+            if (!renderThreadStarted)
             {
-                InitializeRemixDevice();
-                if (deviceRegistered)
+                LogSource.LogInfo("TryRegisterDevice: starting render thread...");
+                try
                 {
-                    CancelInvoke("TryRegisterDevice");
+                    InitializeRemixDevice();
+                    renderThreadStarted = true;
                 }
+                catch (Exception ex)
+                {
+                    LogSource.LogError($"Failed in TryRegisterDevice: {ex}");
+                }
+                return;
             }
-            catch (Exception ex)
+            
+            // Phase 2: wait for the render thread to confirm device is ready
+            if (renderThread != null && renderThread.DeviceReady)
             {
-                LogSource.LogError($"Failed in TryRegisterDevice: {ex}");
+                deviceRegistered = true;
+                LogSource.LogInfo("Device registered — render thread confirmed ready");
+                CancelInvoke("TryRegisterDevice");
             }
         }
         
@@ -414,9 +426,8 @@ namespace UnityRemix
                 windowManager.SetWindowDimensions(width, height);
             }
             
-            deviceRegistered = true;
-            
-            // Start render thread (creates window and begins rendering)
+            // Start render thread — it will create the window and D3D9 device.
+            // deviceRegistered stays false until the render thread confirms DeviceReady.
             LogSource.LogInfo("Starting render thread...");
             renderThread?.Start();
         }

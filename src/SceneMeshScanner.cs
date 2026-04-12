@@ -163,6 +163,7 @@ namespace UnityRemix
             this.materialManager = materialManager;
             this.apiLock = apiLock;
             this.scanActiveOnly = scanActiveOnly;
+            NativeMeshReader.SetLogger(logger);
         }
 
         /// <summary>
@@ -563,6 +564,7 @@ namespace UnityRemix
                     $" | skipped: {skippedWrongScene} wrong scene, {skippedAlreadyScanned} already scanned," +
                     $" {skippedInactive} inactive, {skippedNoRenderer} no renderer, {skippedNoMesh} no mesh," +
                     $" {skippedReadError} read error, {skippedNoVerts} no verts, {skippedNoTris} no tris");
+                materialManager.LogMaterialStats();
             }
 
             return queued;
@@ -871,7 +873,7 @@ namespace UnityRemix
 
             // Get vertex layout
             var attributes = mesh.GetVertexAttributes();
-            int stride = mesh.GetVertexBufferStride(0);
+            int stride = MeshCompat.GetVertexBufferStride(mesh, 0);
 
             int posOffset = -1, posStream = -1;
             int normOffset = -1, normStream = -1;
@@ -885,17 +887,17 @@ namespace UnityRemix
                 switch (attr.attribute)
                 {
                     case VertexAttribute.Position:
-                        posOffset = mesh.GetVertexAttributeOffset(VertexAttribute.Position);
+                        posOffset = MeshCompat.GetVertexAttributeOffset(mesh, VertexAttribute.Position);
                         posStream = attr.stream;
                         posFormat = attr.format;
                         break;
                     case VertexAttribute.Normal:
-                        normOffset = mesh.GetVertexAttributeOffset(VertexAttribute.Normal);
+                        normOffset = MeshCompat.GetVertexAttributeOffset(mesh, VertexAttribute.Normal);
                         normStream = attr.stream;
                         normFormat = attr.format;
                         break;
                     case VertexAttribute.TexCoord0:
-                        uvOffset = mesh.GetVertexAttributeOffset(VertexAttribute.TexCoord0);
+                        uvOffset = MeshCompat.GetVertexAttributeOffset(mesh, VertexAttribute.TexCoord0);
                         uvStream = attr.stream;
                         uvFormat = attr.format;
                         break;
@@ -905,112 +907,12 @@ namespace UnityRemix
             if (posOffset < 0 || posStream != 0)
                 return false;
 
-            // Read vertex buffer from GPU
-            GraphicsBuffer vertexBuffer = mesh.GetVertexBuffer(0);
-            if (vertexBuffer == null)
-                return false;
-
-            byte[] rawVerts;
-            try
-            {
-                rawVerts = new byte[vertexBuffer.count * vertexBuffer.stride];
-                vertexBuffer.GetData(rawVerts);
-            }
-            finally
-            {
-                vertexBuffer.Dispose();
-            }
-
-            // Parse positions
-            positions = new Vector3[vertexCount];
-            for (int i = 0; i < vertexCount; i++)
-            {
-                int baseOff = i * stride + posOffset;
-                positions[i] = ReadVector3(rawVerts, baseOff, posFormat);
-            }
-
-            // Parse normals
-            if (normOffset >= 0 && normStream == 0)
-            {
-                normals = new Vector3[vertexCount];
-                for (int i = 0; i < vertexCount; i++)
-                {
-                    int baseOff = i * stride + normOffset;
-                    normals[i] = ReadVector3(rawVerts, baseOff, normFormat);
-                }
-            }
-
-            // Parse UVs
-            if (uvOffset >= 0 && uvStream == 0)
-            {
-                uvs = new Vector2[vertexCount];
-                for (int i = 0; i < vertexCount; i++)
-                {
-                    int baseOff = i * stride + uvOffset;
-                    uvs[i] = ReadVector2(rawVerts, baseOff, uvFormat);
-                }
-            }
-
-            // Read index buffer from GPU, split by submesh
-            GraphicsBuffer indexBuffer = mesh.GetIndexBuffer();
-            if (indexBuffer == null)
-                return false;
-
-            int totalIndices = 0;
-            try
-            {
-                bool is32Bit = mesh.indexFormat == IndexFormat.UInt32;
-
-                // Read the full index buffer once
-                int[] intBuf = null;
-                ushort[] shortBuf = null;
-                if (is32Bit)
-                {
-                    intBuf = new int[indexBuffer.count];
-                    indexBuffer.GetData(intBuf);
-                }
-                else
-                {
-                    shortBuf = new ushort[indexBuffer.count];
-                    indexBuffer.GetData(shortBuf);
-                }
-
-                // Split into per-submesh arrays
-                var subList = new List<int[]>();
-                for (int sub = 0; sub < mesh.subMeshCount; sub++)
-                {
-                    if (mesh.GetTopology(sub) != MeshTopology.Triangles)
-                    {
-                        subList.Add(null);
-                        continue;
-                    }
-                    var desc = mesh.GetSubMesh(sub);
-                    int start = desc.indexStart;
-                    int count = desc.indexCount;
-                    var tris = new int[count];
-
-                    if (is32Bit)
-                    {
-                        for (int i = 0; i < count; i++)
-                            tris[i] = intBuf[start + i];
-                    }
-                    else
-                    {
-                        for (int i = 0; i < count; i++)
-                            tris[i] = shortBuf[start + i];
-                    }
-                    subList.Add(tris);
-                    totalIndices += count;
-                }
-                subMeshIndices = subList.ToArray();
-            }
-            finally
-            {
-                indexBuffer.Dispose();
-            }
-
-            logger.LogInfo($"GPU readback: mesh '{mesh.name}' — {vertexCount} verts, {totalIndices} indices, {mesh.subMeshCount} submeshes");
-            return positions.Length > 0 && totalIndices > 0;
+            // Use native D3D11 readback — works for non-readable meshes in Unity 2019
+            return NativeMeshReader.ReadMesh(mesh, stride,
+                posOffset, posFormat,
+                normOffset >= 0 && normStream == 0 ? normOffset : -1, normFormat,
+                uvOffset >= 0 && uvStream == 0 ? uvOffset : -1, uvFormat,
+                out positions, out normals, out uvs, out subMeshIndices);
         }
 
         /// <summary>
@@ -1038,100 +940,6 @@ namespace UnityRemix
                 normals[i] = len > 1e-6f ? normals[i] / len : Vector3.up;
             }
             return normals;
-        }
-
-        private static Vector3 ReadVector3(byte[] data, int offset, VertexAttributeFormat format)
-        {
-            switch (format)
-            {
-                case VertexAttributeFormat.Float32:
-                    return new Vector3(
-                        BitConverter.ToSingle(data, offset),
-                        BitConverter.ToSingle(data, offset + 4),
-                        BitConverter.ToSingle(data, offset + 8));
-                case VertexAttributeFormat.Float16:
-                    return new Vector3(
-                        HalfToFloat(BitConverter.ToUInt16(data, offset)),
-                        HalfToFloat(BitConverter.ToUInt16(data, offset + 2)),
-                        HalfToFloat(BitConverter.ToUInt16(data, offset + 4)));
-                case VertexAttributeFormat.SNorm8:
-                    return new Vector3(
-                        (sbyte)data[offset] / 127f,
-                        (sbyte)data[offset + 1] / 127f,
-                        (sbyte)data[offset + 2] / 127f);
-                case VertexAttributeFormat.UNorm8:
-                    return new Vector3(
-                        data[offset] / 255f * 2f - 1f,
-                        data[offset + 1] / 255f * 2f - 1f,
-                        data[offset + 2] / 255f * 2f - 1f);
-                case VertexAttributeFormat.SNorm16:
-                    return new Vector3(
-                        BitConverter.ToInt16(data, offset) / 32767f,
-                        BitConverter.ToInt16(data, offset + 2) / 32767f,
-                        BitConverter.ToInt16(data, offset + 4) / 32767f);
-                case VertexAttributeFormat.UNorm16:
-                    return new Vector3(
-                        BitConverter.ToUInt16(data, offset) / 65535f * 2f - 1f,
-                        BitConverter.ToUInt16(data, offset + 2) / 65535f * 2f - 1f,
-                        BitConverter.ToUInt16(data, offset + 4) / 65535f * 2f - 1f);
-                default:
-                    return Vector3.zero;
-            }
-        }
-
-        private static Vector2 ReadVector2(byte[] data, int offset, VertexAttributeFormat format)
-        {
-            switch (format)
-            {
-                case VertexAttributeFormat.Float32:
-                    return new Vector2(
-                        BitConverter.ToSingle(data, offset),
-                        BitConverter.ToSingle(data, offset + 4));
-                case VertexAttributeFormat.Float16:
-                    return new Vector2(
-                        HalfToFloat(BitConverter.ToUInt16(data, offset)),
-                        HalfToFloat(BitConverter.ToUInt16(data, offset + 2)));
-                case VertexAttributeFormat.SNorm8:
-                    return new Vector2(
-                        (sbyte)data[offset] / 127f,
-                        (sbyte)data[offset + 1] / 127f);
-                case VertexAttributeFormat.UNorm8:
-                    return new Vector2(
-                        data[offset] / 255f,
-                        data[offset + 1] / 255f);
-                case VertexAttributeFormat.SNorm16:
-                    return new Vector2(
-                        BitConverter.ToInt16(data, offset) / 32767f,
-                        BitConverter.ToInt16(data, offset + 2) / 32767f);
-                case VertexAttributeFormat.UNorm16:
-                    return new Vector2(
-                        BitConverter.ToUInt16(data, offset) / 65535f,
-                        BitConverter.ToUInt16(data, offset + 2) / 65535f);
-                default:
-                    return Vector2.zero;
-            }
-        }
-
-        private static float HalfToFloat(ushort half)
-        {
-            int sign = (half >> 15) & 1;
-            int exp = (half >> 10) & 0x1F;
-            int mantissa = half & 0x3FF;
-
-            if (exp == 0)
-            {
-                if (mantissa == 0) return sign == 1 ? -0f : 0f;
-                // Denormalized
-                float val = mantissa / 1024f * (1f / 16384f);
-                return sign == 1 ? -val : val;
-            }
-            if (exp == 31)
-            {
-                return mantissa == 0 ? (sign == 1 ? float.NegativeInfinity : float.PositiveInfinity) : float.NaN;
-            }
-
-            float result = (float)Math.Pow(2, exp - 15) * (1f + mantissa / 1024f);
-            return sign == 1 ? -result : result;
         }
     }
 }

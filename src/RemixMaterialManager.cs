@@ -62,14 +62,37 @@ namespace UnityRemix
         // Track which textures have meaningful alpha (not all-opaque)
         private HashSet<int> texturesWithAlpha = new HashSet<int>();
         
+        // Track textures with genuine cutout transparency (large regions of near-zero alpha).
+        // Distinguished from smoothness-as-alpha (gradual values) used in Standard shader Opaque mode.
+        private HashSet<int> texturesWithCutoutAlpha = new HashSet<int>();
+        
         // Cache for materials - maps Unity material instance ID to Remix material handle
         private Dictionary<int, IntPtr> materialCache = new Dictionary<int, IntPtr>();
 
         // Track materials that fell back to the debug placeholder texture (no albedo)
         private readonly HashSet<string> placeholderMaterialNames = new HashSet<string>();
         
+        // Cache for solid-color 1x1 textures — maps RGBA32 key to (provisional handle = hash as IntPtr)
+        private Dictionary<uint, IntPtr> solidColorTextureCache = new Dictionary<uint, IntPtr>();
+        
         // Cache for tinted emissive textures - maps (texId ^ tintColorKey) to (handle, hash)
         private Dictionary<long, (IntPtr handle, ulong hash)> tintedTextureCache = new Dictionary<long, (IntPtr, ulong)>();
+        
+        // Deferred texture upload queue — main thread prepares pixel data, render thread calls Remix API.
+        // Prevents cross-thread DXVK lock contention between CreateTexture (s_mutex→devLock) and Present (devLock→submission).
+        private struct PendingTextureUpload
+        {
+            public int texId;            // Unity texture instance ID (-1 for tinted/SDF entries)
+            public long tintedCacheKey;  // Tinted texture cache key (0 for regular textures)
+            public byte[] pixelData;
+            public ulong hash;
+            public uint width, height, mipLevels;
+            public RemixAPI.remixapi_Format format;
+        }
+        private readonly Queue<PendingTextureUpload> pendingTextureUploads = new Queue<PendingTextureUpload>();
+        private readonly HashSet<int> pendingTextureIds = new HashSet<int>();
+        private readonly HashSet<long> pendingTintedKeys = new HashSet<long>();
+        private readonly object pendingTextureLock = new object();
         
         // Alpha handling modes detected from Unity materials
         public enum AlphaMode
@@ -101,7 +124,7 @@ namespace UnityRemix
             public float emissiveIntensity;
             public bool useEmissiveBlend;  // Use kAlphaEmissive blend instead of kAlpha
         }
-        private Dictionary<int, MaterialTextureData> materialTextureData = new Dictionary<int, MaterialTextureData>();
+        private System.Collections.Concurrent.ConcurrentDictionary<int, MaterialTextureData> materialTextureData = new System.Collections.Concurrent.ConcurrentDictionary<int, MaterialTextureData>();
         private HashSet<string> loggedShaderProperties = new HashSet<string>();
         
         // Queue for async material creation
@@ -318,10 +341,12 @@ namespace UnityRemix
                             matData.albedoTextureHash = hash;
                         }
                         
-                        // Fallback: if shader metadata says Opaque but the texture has alpha, upgrade to Cutout.
-                        // Skip if the shader name explicitly contains "Opaque" — the alpha channel is likely
-                        // roughness/smoothness/AO, not transparency (common Unity texture packing convention).
-                        if (matData.alphaMode == AlphaMode.Opaque && texturesWithAlpha.Contains(texId)
+                        // Fallback: if shader metadata says Opaque but the texture has genuine cutout
+                        // transparency (large near-zero alpha regions), upgrade to Cutout.
+                        // Uses texturesWithCutoutAlpha (strict: >=10% pixels at alpha<16) instead of
+                        // texturesWithAlpha (loose: any pixel<250) to avoid false positives from
+                        // smoothness-as-alpha in Standard shader Opaque mode.
+                        if (matData.alphaMode == AlphaMode.Opaque && texturesWithCutoutAlpha.Contains(texId)
                             && (shaderName == null || shaderName.IndexOf("Opaque", StringComparison.OrdinalIgnoreCase) < 0))
                         {
                             matData.alphaMode = AlphaMode.Cutout;
@@ -331,6 +356,18 @@ namespace UnityRemix
                                 logger.LogInfo($"[AlphaFallback] '{material.name}': texture has alpha content, upgrading Opaque -> Cutout (cutoff={matData.alphaCutoff:F2})");
                         }
                     }
+                }
+            }
+            
+            // Fallback: no albedo texture but material has a color — create a 1x1 solid-color texture
+            // so Remix renders the surface with the correct color instead of the debug checkerboard.
+            if (matData.albedoHandle == IntPtr.Zero && material.HasProperty("_Color"))
+            {
+                matData.albedoHandle = GetOrCreateSolidColorTexture(matData.albedoColor);
+                if (matData.albedoHandle != IntPtr.Zero)
+                {
+                    ulong h = (ulong)matData.albedoHandle.ToInt64();
+                    matData.albedoTextureHash = h;
                 }
             }
             
@@ -604,11 +641,58 @@ namespace UnityRemix
             
             string albedoPath = GetTexturePathFromHandle(matData.albedoHandle);
             string normalPath = GetTexturePathFromHandle(matData.normalHandle);
-            //logger.LogInfo($"Textures ready for material '{material.name}': albedo={albedoPath ?? "none"}, normal={normalPath ?? "none"}");
+            logger.LogInfo($"[MatCapture] '{material.name}' shader='{material.shader?.name}' albedo={albedoPath ?? "NONE"} normal={normalPath ?? "none"}");
         }
         
         /// <summary>
-        /// Upload Unity texture to Remix
+        /// Get or create a 1x1 solid-color texture for materials that only use _Color with no _MainTex.
+        /// Defers the actual upload to the render thread like regular textures.
+        /// Returns the provisional handle (hash as IntPtr).
+        /// </summary>
+        private IntPtr GetOrCreateSolidColorTexture(Color color)
+        {
+            byte r = (byte)(Mathf.Clamp01(color.r) * 255f);
+            byte g = (byte)(Mathf.Clamp01(color.g) * 255f);
+            byte b = (byte)(Mathf.Clamp01(color.b) * 255f);
+            byte a = (byte)(Mathf.Clamp01(color.a) * 255f);
+            uint colorKey = (uint)(r | (g << 8) | (b << 16) | (a << 24));
+            
+            lock (pendingTextureLock)
+            {
+                if (solidColorTextureCache.TryGetValue(colorKey, out IntPtr cached))
+                    return cached;
+            }
+            
+            byte[] pixels = new byte[] { r, g, b, a };
+            ulong hash = XXHash64.ComputeHash(pixels, 0, 4);
+            // Mix in a sentinel so solid-color hashes don't collide with real texture hashes
+            hash ^= 0x50C0_10C0_10C0_10C0UL;
+            if (hash == 0) hash = 1;
+            
+            lock (pendingTextureLock)
+            {
+                pendingTextureUploads.Enqueue(new PendingTextureUpload
+                {
+                    texId = -1,
+                    tintedCacheKey = 0,
+                    pixelData = pixels,
+                    hash = hash,
+                    width = 1,
+                    height = 1,
+                    mipLevels = 1,
+                    format = RemixAPI.remixapi_Format.REMIXAPI_FORMAT_R8G8B8A8_SRGB
+                });
+                
+                var handle = new IntPtr((long)hash);
+                solidColorTextureCache[colorKey] = handle;
+                return handle;
+            }
+        }
+        
+        /// <summary>
+        /// Prepare a Unity texture for Remix upload. Pixel data is captured on the calling thread,
+        /// but the actual Remix API call is deferred to the render thread via ProcessPendingTextureUploads().
+        /// Returns a provisional handle (the texture hash cast to IntPtr).
         /// </summary>
         public IntPtr UploadUnityTexture(Texture2D unityTexture, bool srgb = true, bool isNormalMap = false)
         {
@@ -617,10 +701,16 @@ namespace UnityRemix
                 
             int texId = unityTexture.GetInstanceID();
             
-            // Check cache first
-            if (textureCache.TryGetValue(texId, out IntPtr cachedHandle))
+            // Check cache and pending queue (synchronized with render thread)
+            lock (pendingTextureLock)
             {
-                return cachedHandle;
+                if (textureCache.TryGetValue(texId, out IntPtr cachedHandle))
+                    return cachedHandle;
+                if (pendingTextureIds.Contains(texId))
+                {
+                    textureHashCache.TryGetValue(texId, out ulong ph);
+                    return ph != 0 ? new IntPtr((long)ph) : IntPtr.Zero;
+                }
             }
             
             try
@@ -765,13 +855,26 @@ namespace UnityRemix
                 else if (format == RemixAPI.remixapi_Format.REMIXAPI_FORMAT_BC3_SRGB ||
                          format == RemixAPI.remixapi_Format.REMIXAPI_FORMAT_BC3_UNORM)
                 {
-                    // DXT5/BC3 has a full alpha channel — assume it's used
-                    hasAlpha = true;
+                    hasAlpha = SampleAlphaBC3(pixelData);
                 }
                 // BC1 (DXT1) has only 1-bit punch-through alpha, treat as opaque
                 
                 if (hasAlpha)
+                {
                     texturesWithAlpha.Add(texId);
+                    
+                    // Check for genuine cutout transparency: large regions of near-zero alpha.
+                    // This distinguishes real transparency (decal backgrounds at alpha=0) from
+                    // smoothness-as-alpha packing (Standard shader Opaque mode, values ~50-230).
+                    bool hasCutoutAlpha;
+                    if (format == RemixAPI.remixapi_Format.REMIXAPI_FORMAT_BC3_SRGB ||
+                        format == RemixAPI.remixapi_Format.REMIXAPI_FORMAT_BC3_UNORM)
+                        hasCutoutAlpha = SampleCutoutAlphaBC3(pixelData);
+                    else
+                        hasCutoutAlpha = SampleCutoutAlphaRGBA(pixelData, alphaOffset: 3, stride: 4);
+                    if (hasCutoutAlpha)
+                        texturesWithCutoutAlpha.Add(texId);
+                }
                 
                 // Compute XXH64 hash
                 ulong textureHash = XXHash64.ComputeHash(hashSourceData, 0, hashSourceData.Length);
@@ -781,48 +884,27 @@ namespace UnityRemix
                 if (verboseTextureLogging.Value)
                     logger.LogInfo($"Computed XXH64 hash for '{unityTexture.name}': 0x{textureHash:X16} hasAlpha={hasAlpha} fmt={unityTexture.format}");
                 
-                // Pin and upload
-                GCHandle pixelHandle = GCHandle.Alloc(pixelData, GCHandleType.Pinned);
-                
-                try
+                // Queue for deferred upload on the render thread
+                lock (pendingTextureLock)
                 {
-                    var textureInfo = new RemixAPI.remixapi_TextureInfo
+                    pendingTextureUploads.Enqueue(new PendingTextureUpload
                     {
-                        sType = RemixAPI.remixapi_StructType.REMIXAPI_STRUCT_TYPE_TEXTURE_INFO,
-                        pNext = IntPtr.Zero,
+                        texId = texId,
+                        tintedCacheKey = 0,
+                        pixelData = pixelData,
                         hash = textureHash,
                         width = (uint)unityTexture.width,
                         height = (uint)unityTexture.height,
-                        depth = 1,
                         mipLevels = actualMipLevels,
-                        format = format,
-                        data = pixelHandle.AddrOfPinnedObject(),
-                        dataSize = (ulong)pixelData.Length
-                    };
-                    
-                    IntPtr textureHandle;
-                    RemixAPI.remixapi_ErrorCode result;
-                    lock (apiLock)
-                    {
-                        result = createTextureFunc(ref textureInfo, out textureHandle);
-                    }
-                    
-                    if (result != RemixAPI.remixapi_ErrorCode.REMIXAPI_ERROR_CODE_SUCCESS)
-                    {
-                        logger.LogError($"Failed to create texture '{unityTexture.name}': {result}");
-                        return IntPtr.Zero;
-                    }
-                    
-                    textureCache[texId] = textureHandle;
-                    if (verboseTextureLogging.Value)
-                        logger.LogInfo($"Successfully uploaded texture '{unityTexture.name}' with handle: 0x{textureHandle.ToInt64():X}");
-                    
-                    return textureHandle;
+                        format = format
+                    });
+                    pendingTextureIds.Add(texId);
                 }
-                finally
-                {
-                    pixelHandle.Free();
-                }
+                
+                if (verboseTextureLogging.Value)
+                    logger.LogInfo($"Queued texture '{unityTexture.name}' for render thread upload (hash: 0x{textureHash:X16})");
+                
+                return new IntPtr((long)textureHash);
             }
             catch (Exception ex)
             {
@@ -861,8 +943,13 @@ namespace UnityRemix
             int tintKey = ((int)(tintR * 255) << 16) | ((int)(tintG * 255) << 8) | (int)(tintB * 255);
             long cacheKey = ((long)tex.GetInstanceID() << 24) ^ (uint)tintKey;
             
-            if (tintedTextureCache.TryGetValue(cacheKey, out var cached))
-                return cached;
+            lock (pendingTextureLock)
+            {
+                if (tintedTextureCache.TryGetValue(cacheKey, out var cached))
+                    return cached;
+                if (pendingTintedKeys.Contains(cacheKey))
+                    return (IntPtr.Zero, 0); // Will be available after render thread processes it
+            }
             
             try
             {
@@ -908,43 +995,25 @@ namespace UnityRemix
                 if (verboseTextureLogging.Value)
                     logger.LogInfo($"Computed tinted emissive hash for '{tex.name}' tint=({tintR:F2},{tintG:F2},{tintB:F2}): 0x{hash:X16}");
                 
-                GCHandle pinned = GCHandle.Alloc(pixelData, GCHandleType.Pinned);
-                try
+                // Queue for deferred upload on the render thread
+                lock (pendingTextureLock)
                 {
-                    var info = new RemixAPI.remixapi_TextureInfo
+                    pendingTextureUploads.Enqueue(new PendingTextureUpload
                     {
-                        sType = RemixAPI.remixapi_StructType.REMIXAPI_STRUCT_TYPE_TEXTURE_INFO,
-                        pNext = IntPtr.Zero,
+                        texId = -1,
+                        tintedCacheKey = cacheKey,
+                        pixelData = pixelData,
                         hash = hash,
                         width = (uint)tex.width,
                         height = (uint)tex.height,
-                        depth = 1,
                         mipLevels = 1,
                         format = srgb ? RemixAPI.remixapi_Format.REMIXAPI_FORMAT_R8G8B8A8_SRGB
-                                      : RemixAPI.remixapi_Format.REMIXAPI_FORMAT_R8G8B8A8_UNORM,
-                        data = pinned.AddrOfPinnedObject(),
-                        dataSize = (ulong)pixelData.Length
-                    };
-                    
-                    IntPtr texHandle;
-                    RemixAPI.remixapi_ErrorCode result;
-                    lock (apiLock) { result = createTextureFunc(ref info, out texHandle); }
-                    
-                    if (result != RemixAPI.remixapi_ErrorCode.REMIXAPI_ERROR_CODE_SUCCESS)
-                    {
-                        logger.LogError($"Failed to upload tinted emissive '{tex.name}': {result}");
-                        return (IntPtr.Zero, 0);
-                    }
-                    
-                    if (verboseTextureLogging.Value)
-                        logger.LogInfo($"Successfully uploaded tinted emissive '{tex.name}' with handle: 0x{texHandle.ToInt64():X}");
-                    tintedTextureCache[cacheKey] = (texHandle, hash);
-                    return (texHandle, hash);
+                                      : RemixAPI.remixapi_Format.REMIXAPI_FORMAT_R8G8B8A8_UNORM
+                    });
+                    pendingTintedKeys.Add(cacheKey);
                 }
-                finally
-                {
-                    pinned.Free();
-                }
+                
+                return (new IntPtr((long)hash), hash);
             }
             catch (Exception ex)
             {
@@ -971,8 +1040,13 @@ namespace UnityRemix
             int tintKey = (tR << 16) | (tG << 8) | tB;
             long cacheKey = ~((long)tex.GetInstanceID() << 24) ^ (uint)tintKey; // bitwise NOT to separate from tinted cache
             
-            if (tintedTextureCache.TryGetValue(cacheKey, out var cached))
-                return cached;
+            lock (pendingTextureLock)
+            {
+                if (tintedTextureCache.TryGetValue(cacheKey, out var cached))
+                    return cached;
+                if (pendingTintedKeys.Contains(cacheKey))
+                    return (IntPtr.Zero, 0);
+            }
             
             try
             {
@@ -1015,42 +1089,24 @@ namespace UnityRemix
                 if (verboseTextureLogging.Value)
                     logger.LogInfo($"Computed SDF emissive hash for '{tex.name}' tint=({tR},{tG},{tB}): 0x{hash:X16}");
                 
-                GCHandle pinned = GCHandle.Alloc(pixelData, GCHandleType.Pinned);
-                try
+                // Queue for deferred upload on the render thread
+                lock (pendingTextureLock)
                 {
-                    var info = new RemixAPI.remixapi_TextureInfo
+                    pendingTextureUploads.Enqueue(new PendingTextureUpload
                     {
-                        sType = RemixAPI.remixapi_StructType.REMIXAPI_STRUCT_TYPE_TEXTURE_INFO,
-                        pNext = IntPtr.Zero,
+                        texId = -1,
+                        tintedCacheKey = cacheKey,
+                        pixelData = pixelData,
                         hash = hash,
                         width = (uint)tex.width,
                         height = (uint)tex.height,
-                        depth = 1,
                         mipLevels = 1,
-                        format = RemixAPI.remixapi_Format.REMIXAPI_FORMAT_R8G8B8A8_SRGB,
-                        data = pinned.AddrOfPinnedObject(),
-                        dataSize = (ulong)pixelData.Length
-                    };
-                    
-                    IntPtr texHandle;
-                    RemixAPI.remixapi_ErrorCode result;
-                    lock (apiLock) { result = createTextureFunc(ref info, out texHandle); }
-                    
-                    if (result != RemixAPI.remixapi_ErrorCode.REMIXAPI_ERROR_CODE_SUCCESS)
-                    {
-                        logger.LogError($"Failed to upload SDF emissive '{tex.name}': {result}");
-                        return (IntPtr.Zero, 0);
-                    }
-                    
-                    if (verboseTextureLogging.Value)
-                        logger.LogInfo($"Successfully uploaded SDF emissive '{tex.name}' with handle: 0x{texHandle.ToInt64():X}");
-                    tintedTextureCache[cacheKey] = (texHandle, hash);
-                    return (texHandle, hash);
+                        format = RemixAPI.remixapi_Format.REMIXAPI_FORMAT_R8G8B8A8_SRGB
+                    });
+                    pendingTintedKeys.Add(cacheKey);
                 }
-                finally
-                {
-                    pinned.Free();
-                }
+                
+                return (new IntPtr((long)hash), hash);
             }
             catch (Exception ex)
             {
@@ -1180,6 +1236,83 @@ namespace UnityRemix
         }
         
         /// <summary>
+        /// Check if uncompressed RGBA pixels have genuine cutout transparency: a significant
+        /// fraction of pixels with near-zero alpha (< 16). This distinguishes real transparency
+        /// (decal backgrounds, cutout shapes) from smoothness-as-alpha packing where values
+        /// are typically 50-230.
+        /// </summary>
+        private static bool SampleCutoutAlphaRGBA(byte[] pixelData, int alphaOffset, int stride)
+        {
+            int pixelCount = pixelData.Length / stride;
+            if (pixelCount == 0) return false;
+            
+            int sampleCount = Math.Min(pixelCount, 1024);
+            int step = Math.Max(1, pixelCount / sampleCount);
+            int nearZeroCount = 0;
+            int totalSampled = 0;
+            
+            for (int i = 0; i < pixelCount; i += step)
+            {
+                int idx = i * stride + alphaOffset;
+                if (idx >= pixelData.Length) break;
+                totalSampled++;
+                if (pixelData[idx] < 16)
+                    nearZeroCount++;
+            }
+            
+            // >= 10% of sampled pixels are near-transparent → genuine cutout
+            return totalSampled > 0 && nearZeroCount * 10 >= totalSampled;
+        }
+        
+        /// <summary>
+        /// Check if a BC3/DXT5 texture has any non-trivial alpha by scanning alpha endpoint
+        /// bytes in each 16-byte block. Returns true if any block has an endpoint below 250.
+        /// </summary>
+        private static bool SampleAlphaBC3(byte[] rawData)
+        {
+            int blockCount = rawData.Length / 16;
+            int step = Math.Max(1, blockCount / 256);
+            for (int b = 0; b < blockCount; b += step)
+            {
+                int offset = b * 16;
+                byte a0 = rawData[offset];
+                byte a1 = rawData[offset + 1];
+                if (a0 < 250 || a1 < 250)
+                    return true;
+            }
+            return false;
+        }
+        
+        /// <summary>
+        /// Check if a BC3/DXT5 texture has genuine cutout transparency by scanning alpha
+        /// endpoints. Returns true if a significant fraction of blocks have near-zero alpha
+        /// endpoints (< 16), indicating real transparency rather than smoothness packing.
+        /// </summary>
+        private static bool SampleCutoutAlphaBC3(byte[] rawData)
+        {
+            int blockCount = rawData.Length / 16;
+            if (blockCount == 0) return false;
+            
+            int sampleCount = Math.Min(blockCount, 1024);
+            int step = Math.Max(1, blockCount / sampleCount);
+            int nearZeroCount = 0;
+            int totalSampled = 0;
+            
+            for (int b = 0; b < blockCount; b += step)
+            {
+                int offset = b * 16;
+                byte a0 = rawData[offset];
+                byte a1 = rawData[offset + 1];
+                totalSampled++;
+                if (a0 < 16 || a1 < 16)
+                    nearZeroCount++;
+            }
+            
+            // >= 10% of sampled blocks have near-zero alpha → genuine cutout
+            return totalSampled > 0 && nearZeroCount * 10 >= totalSampled;
+        }
+        
+        /// <summary>
         /// Detect alpha mode from Unity material properties, shader keywords, and render queue.
         /// Covers Standard shader (_Mode), URP/HDRP (_Surface), and keyword-based detection.
         /// Returns (mode, reason) for diagnostic logging.
@@ -1289,9 +1422,9 @@ namespace UnityRemix
                     case AlphaMode.Blend:
                         opaqueExt.blendType_hasvalue = 1; // remixapi_Bool.True
                         // kAlphaEmissive (1) makes the surface directly visible as a
-                        // glowing blended surface; kAlpha (0) only contributes light
-                        // bounces which makes emissive blended geometry invisible.
-                        opaqueExt.blendType_value = matData.useEmissiveBlend ? 1 : 0;
+                        // blended surface; kAlpha (0) only contributes indirect light
+                        // bounces which makes blended geometry invisible in direct view.
+                        opaqueExt.blendType_value = 1;
                         break;
                 }
                 
@@ -1369,6 +1502,77 @@ namespace UnityRemix
         }
         
         /// <summary>
+        /// Process queued texture uploads on the render thread.
+        /// Must be called before ProcessMeshCreationBatch so textures are available when materials are created.
+        /// </summary>
+        public void ProcessPendingTextureUploads()
+        {
+            PendingTextureUpload[] batch;
+            lock (pendingTextureLock)
+            {
+                if (pendingTextureUploads.Count == 0)
+                    return;
+                batch = pendingTextureUploads.ToArray();
+                pendingTextureUploads.Clear();
+            }
+            
+            foreach (var upload in batch)
+            {
+                GCHandle pinned = GCHandle.Alloc(upload.pixelData, GCHandleType.Pinned);
+                try
+                {
+                    var info = new RemixAPI.remixapi_TextureInfo
+                    {
+                        sType = RemixAPI.remixapi_StructType.REMIXAPI_STRUCT_TYPE_TEXTURE_INFO,
+                        pNext = IntPtr.Zero,
+                        hash = upload.hash,
+                        width = upload.width,
+                        height = upload.height,
+                        depth = 1,
+                        mipLevels = upload.mipLevels,
+                        format = upload.format,
+                        data = pinned.AddrOfPinnedObject(),
+                        dataSize = (ulong)upload.pixelData.Length
+                    };
+                    
+                    IntPtr handle;
+                    RemixAPI.remixapi_ErrorCode result;
+                    lock (apiLock) { result = createTextureFunc(ref info, out handle); }
+                    
+                    if (result == RemixAPI.remixapi_ErrorCode.REMIXAPI_ERROR_CODE_SUCCESS)
+                    {
+                        lock (pendingTextureLock)
+                        {
+                            if (upload.texId >= 0)
+                            {
+                                textureCache[upload.texId] = handle;
+                                pendingTextureIds.Remove(upload.texId);
+                            }
+                            if (upload.tintedCacheKey != 0)
+                            {
+                                tintedTextureCache[upload.tintedCacheKey] = (handle, upload.hash);
+                                pendingTintedKeys.Remove(upload.tintedCacheKey);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        logger.LogError($"Failed to upload deferred texture (hash 0x{upload.hash:X16}): {result}");
+                        lock (pendingTextureLock)
+                        {
+                            if (upload.texId >= 0) pendingTextureIds.Remove(upload.texId);
+                            if (upload.tintedCacheKey != 0) pendingTintedKeys.Remove(upload.tintedCacheKey);
+                        }
+                    }
+                }
+                finally
+                {
+                    pinned.Free();
+                }
+            }
+        }
+        
+        /// <summary>
         /// Lazily creates the debug texture on first use (must be called from render thread
         /// after the Remix device is registered).
         /// </summary>
@@ -1425,10 +1629,13 @@ namespace UnityRemix
                 }
 
                 if (result == RemixAPI.remixapi_ErrorCode.REMIXAPI_ERROR_CODE_SUCCESS)
-                    if (verboseTextureLogging.Value)
-                        logger.LogInfo($"Created debug placeholder texture (hash: 0x{debugTextureHash:X16})");
+                {
+                    logger.LogInfo($"Created debug placeholder texture (hash: 0x{debugTextureHash:X16})");
+                }
                 else
+                {
                     logger.LogWarning($"Failed to create debug texture: {result}");
+                }
             }
             finally
             {
@@ -1447,6 +1654,14 @@ namespace UnityRemix
                 materialCreationThread.Join(1000);
             }
             
+            // Discard pending uploads
+            lock (pendingTextureLock)
+            {
+                pendingTextureUploads.Clear();
+                pendingTextureIds.Clear();
+                pendingTintedKeys.Clear();
+            }
+            
             if (destroyTextureFunc != null)
             {
                 foreach (var handle in textureCache.Values)
@@ -1463,6 +1678,25 @@ namespace UnityRemix
         // --- Diagnostic getters for debug HUD ---
         public int TextureCacheCount => textureCache.Count;
         public int MaterialDataCount => materialTextureData.Count;
+
+        /// <summary>
+        /// Log a summary of captured material texture stats.
+        /// </summary>
+        public void LogMaterialStats()
+        {
+            int total = materialTextureData.Count;
+            int withAlbedo = 0, noAlbedo = 0;
+            foreach (var kvp in materialTextureData)
+            {
+                if (kvp.Value.albedoHandle != IntPtr.Zero)
+                    withAlbedo++;
+                else
+                    noAlbedo++;
+            }
+            int pendingTex;
+            lock (pendingTextureLock) { pendingTex = pendingTextureUploads.Count; }
+            logger.LogInfo($"[MaterialStats] {total} materials captured: {withAlbedo} with albedo, {noAlbedo} without | texCache={textureCache.Count} pendingTex={pendingTex}");
+        }
 
         /// <summary>
         /// Returns a snapshot of material names that fell back to the debug placeholder texture.

@@ -30,6 +30,13 @@ namespace UnityRemix
         // Thread state
         private Thread renderThread;
         private volatile bool renderThreadRunning = false;
+        private volatile bool deviceReady = false;
+        
+        /// <summary>
+        /// True once the render thread has created the window and called Remix Startup successfully.
+        /// The main thread must not call any Remix API until this is true.
+        /// </summary>
+        public bool DeviceReady => deviceReady;
         
         // Test objects
         private IntPtr testMeshHandle = IntPtr.Zero;
@@ -136,6 +143,10 @@ namespace UnityRemix
                 logger.LogError("Failed to create Remix window on render thread");
                 return;
             }
+            
+            // Signal that the device is ready for API calls from other threads
+            deviceReady = true;
+            logger.LogInfo("Remix device ready — main thread may now call API");
             
             // Create test objects
             logger.LogInfo("Creating test triangle and light...");
