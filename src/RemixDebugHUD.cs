@@ -21,7 +21,7 @@ namespace UnityRemix
 
         private readonly ManualLogSource _log;
         private readonly UnityRemixPlugin _plugin;
-        private bool _visible = true;
+        private bool _visible = false;
         private bool _f3WasDown;
 
         private HUDSnapshot _snapshot;
@@ -44,6 +44,7 @@ namespace UnityRemix
             public int CachedSkinnedRenderers;
             public int ScannedInstances;
             public int ScannerStreamQueue;
+            public StaticGeometryStats StaticGeometryStats;
             public int LightCount;
             public string CameraName;
             public string SceneName;
@@ -129,6 +130,7 @@ namespace UnityRemix
                 snap.PersistentStatic = fc.PersistentStaticCount;
                 snap.CachedStaticRenderers = fc.CachedStaticRendererCount;
                 snap.CachedSkinnedRenderers = fc.CachedSkinnedRendererCount;
+                snap.StaticGeometryStats = fc.GetStaticGeometryStats(sc);
             }
 
             if (sc != null)
@@ -270,6 +272,7 @@ namespace UnityRemix
             RemixImGui.Text($"Textures:  {snap.TextureCache}");
             RemixImGui.Text($"Materials: {snap.MaterialData}");
             RemixImGui.Text($"Lights:    {snap.LightCount}");
+            RemixImGui.Text($"Unique Static Objects: {snap.StaticGeometryStats.DedupedVisibleStaticTotal}");
 
             if (snap.MeshEntries != null && snap.MeshEntries.Length > 0)
             {
@@ -292,11 +295,17 @@ namespace UnityRemix
             RemixImGui.Text($"  Skinned renderers: {snap.CachedSkinnedRenderers}");
             RemixImGui.Text($"  Persistent static: {snap.PersistentStatic}");
             RemixImGui.Text($"  Pending creation:  {snap.PendingMeshQueue}");
+            RemixImGui.Text($"  Raw renderers:     {snap.StaticGeometryStats.RawStaticRenderers}");
+            RemixImGui.Text($"  Unique renderers:  {snap.StaticGeometryStats.DedupedStaticRenderers} (-{snap.StaticGeometryStats.SuppressedStaticRenderers})");
+            RemixImGui.Text($"  Raw static meshes: {snap.StaticGeometryStats.RawStaticMeshes}");
+            RemixImGui.Text($"  Visible meshes:    {snap.StaticGeometryStats.DedupedStaticMeshes} (-{snap.StaticGeometryStats.SuppressedStaticMeshes})");
 
             RemixImGui.Spacing();
             RemixImGui.TextColored(0.6f, 1.0f, 0.6f, 1.0f, "Scene Scanner");
             RemixImGui.Text($"  Scanned instances: {snap.ScannedInstances}");
             RemixImGui.Text($"  Streaming queue:   {snap.ScannerStreamQueue}");
+            RemixImGui.Text($"  Raw scene scan:    {snap.StaticGeometryStats.RawSceneScanInstances}");
+            RemixImGui.Text($"  Visible scan:      {snap.StaticGeometryStats.DedupedSceneScanInstances} (-{snap.StaticGeometryStats.SuppressedSceneScanInstances})");
 
             RemixImGui.Unindent();
         }

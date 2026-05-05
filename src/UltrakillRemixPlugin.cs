@@ -213,19 +213,8 @@ namespace UnityRemix
             // Refresh camera snapshots for UI
             cameraHandler?.RefreshCameraSnapshots();
             
-            // Initialize Remix if needed
-            if (remixInitialized && !deviceRegistered)
-            {
-                LogSource.LogInfo("Starting Remix initialization...");
-                try
-                {
-                    InitializeRemixDevice();
-                }
-                catch (Exception ex)
-                {
-                    LogSource.LogError($"Failed to initialize Remix device: {ex}");
-                }
-            }
+            // Keep device registration progressing across scene transitions.
+            AdvanceDeviceRegistration();
             
             // Capture initial data
             if (configUseGameGeometry.Value && deviceRegistered && frameCapture != null)
@@ -272,8 +261,8 @@ namespace UnityRemix
             // Initialize components
             InitializeComponents();
             
-            // Start device registration
-            InvokeRepeating("TryRegisterDevice", 2.0f, 1.0f);
+            // Device registration is advanced from Update/UpdateFromPersistent so it survives
+            // plugin recreation during scene transitions.
         }
         
         private void InitializeComponents()
@@ -381,19 +370,16 @@ namespace UnityRemix
         }
         
         private bool renderThreadStarted = false;
-        
-        private void TryRegisterDevice()
+
+        private void AdvanceDeviceRegistration()
         {
-            if (deviceRegistered)
-            {
-                CancelInvoke("TryRegisterDevice");
+            if (!remixInitialized || deviceRegistered)
                 return;
-            }
-            
+
             // Phase 1: start the render thread (once)
             if (!renderThreadStarted)
             {
-                LogSource.LogInfo("TryRegisterDevice: starting render thread...");
+                LogSource.LogInfo("Device registration: starting render thread...");
                 try
                 {
                     InitializeRemixDevice();
@@ -401,7 +387,7 @@ namespace UnityRemix
                 }
                 catch (Exception ex)
                 {
-                    LogSource.LogError($"Failed in TryRegisterDevice: {ex}");
+                    LogSource.LogError($"Failed while starting render thread: {ex}");
                 }
                 return;
             }
@@ -411,7 +397,6 @@ namespace UnityRemix
             {
                 deviceRegistered = true;
                 LogSource.LogInfo("Device registered — render thread confirmed ready");
-                CancelInvoke("TryRegisterDevice");
             }
         }
         
@@ -436,8 +421,7 @@ namespace UnityRemix
         {
             frameCount++;
 
-
-            // Device registration happens via InvokeRepeating in TryRegisterDevice
+            AdvanceDeviceRegistration();
             
             // Rescan for async-loaded meshes (Addressables, etc.)
             if (configEnableSceneScan.Value)
@@ -461,7 +445,11 @@ namespace UnityRemix
         
         public void UpdateFromPersistent()
         {
-            if (!remixInitialized || !deviceRegistered)
+            if (!remixInitialized)
+                return;
+
+            AdvanceDeviceRegistration();
+            if (!deviceRegistered)
                 return;
             
             if (frameCount % 300 == 1 && LogSource != null)

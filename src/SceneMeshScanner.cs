@@ -32,6 +32,8 @@ namespace UnityRemix
         private struct ScannedMeshData
         {
             public ulong MeshHash;
+            public StaticGeometryKey DedupeKey;
+            public int RendererInstanceId;
             public Vector3[] Vertices;
             public Vector3[] Normals;
             public Vector2[] UVs;
@@ -45,9 +47,18 @@ namespace UnityRemix
         public struct InstanceData
         {
             public IntPtr MeshHandle;
+            public StaticGeometryKey DedupeKey;
+            public int RendererInstanceId;
             public RemixAPI.remixapi_Transform Transform;
             public int Layer;
             public Vector3 BoundsCenter;
+        }
+
+        public struct DedupeEntry
+        {
+            public StaticGeometryKey DedupeKey;
+            public int RendererInstanceId;
+            public int Layer;
         }
 
         // Streaming: main thread pushes extracted mesh data, render thread drains batches
@@ -96,6 +107,27 @@ namespace UnityRemix
         public int StreamingQueueCount
         {
             get { lock (streamLock) { return streamingQueue.Count; } }
+        }
+
+        public DedupeEntry[] GetDedupeEntries()
+        {
+            lock (instanceLock)
+            {
+                if (currentInstances.Count == 0)
+                    return Array.Empty<DedupeEntry>();
+
+                var entries = new DedupeEntry[currentInstances.Count];
+                for (int i = 0; i < currentInstances.Count; i++)
+                {
+                    entries[i] = new DedupeEntry
+                    {
+                        DedupeKey = currentInstances[i].DedupeKey,
+                        RendererInstanceId = currentInstances[i].RendererInstanceId,
+                        Layer = currentInstances[i].Layer
+                    };
+                }
+                return entries;
+            }
         }
 
         /// <summary>
@@ -536,6 +568,7 @@ namespace UnityRemix
 
                 // Use filter instance ID in hash so each object gets its own Remix mesh + material binding
                 ulong meshHash = GenerateInstanceMeshHash(mesh, filterId);
+                var dedupeKey = StaticGeometryDedupe.BuildKey(renderer, mesh);
 
                 if (colors != null && colors.Length > 0)
                     vertexColorCount++;
@@ -545,6 +578,8 @@ namespace UnityRemix
                     streamingQueue.Enqueue(new ScannedMeshData
                     {
                         MeshHash = meshHash,
+                        DedupeKey = dedupeKey,
+                        RendererInstanceId = renderer.GetInstanceID(),
                         Vertices = vertices,
                         Normals = normals,
                         UVs = uvs,
@@ -610,6 +645,8 @@ namespace UnityRemix
                 newInstances.Add(new InstanceData
                 {
                     MeshHandle = meshHandle,
+                    DedupeKey = entry.DedupeKey,
+                    RendererInstanceId = entry.RendererInstanceId,
                     Transform = transform,
                     Layer = entry.Layer,
                     BoundsCenter = ComputeBoundsCenter(entry.Vertices, entry.LocalToWorld)

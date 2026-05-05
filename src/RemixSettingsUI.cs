@@ -185,8 +185,13 @@ namespace UnityRemix
             // Merge scanned instance counts from SceneMeshScanner
             var scanner = _plugin.SceneMeshScanner;
             var scannedCounts = scanner?.GetLayerCounts();
+            var stats = fc.GetStaticGeometryStats(scanner);
 
             RemixImGui.Text($"{layers.Length} layers, {renderers.Length} active renderers");
+            RemixImGui.Text($"Static Meshes: raw {stats.RawStaticMeshes}, visible {stats.DedupedStaticMeshes}, suppressed {stats.SuppressedStaticMeshes}");
+            RemixImGui.Text($"Renderers: raw {stats.RawStaticRenderers}, unique {stats.DedupedStaticRenderers}, duplicates {stats.SuppressedStaticRenderers}");
+            RemixImGui.Text($"Scene Scan: raw {stats.RawSceneScanInstances}, visible {stats.DedupedSceneScanInstances}, suppressed {stats.SuppressedSceneScanInstances}");
+            RemixImGui.Text($"Unique visible static objects: {stats.DedupedVisibleStaticTotal}");
 
             if (layers.Length == 0)
                 return;

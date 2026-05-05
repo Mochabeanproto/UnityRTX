@@ -181,6 +181,88 @@ namespace UnityRemix
         public int CachedStaticRendererCount => cachedRenderers.Count;
         public int CachedSkinnedRendererCount => cachedSkinnedRenderers.Count;
 
+        public StaticGeometryStats GetStaticGeometryStats(SceneMeshScanner scanner)
+        {
+            var stats = new StaticGeometryStats();
+            var visibleKeys = new HashSet<StaticGeometryKey>();
+            var rendererKeys = new HashSet<StaticGeometryKey>();
+
+            for (int i = 0; i < cachedRenderers.Count; i++)
+            {
+                var renderer = cachedRenderers[i];
+                if (renderer == null)
+                    continue;
+
+                var meshFilter = renderer.GetComponent<MeshFilter>();
+                var mesh = meshFilter != null ? meshFilter.sharedMesh : null;
+                if (mesh == null)
+                    continue;
+
+                var key = StaticGeometryDedupe.BuildKey(renderer, mesh);
+                if (!key.IsValid)
+                    continue;
+
+                stats.RawStaticRenderers++;
+                if (rendererKeys.Add(key))
+                    stats.DedupedStaticRenderers++;
+                else
+                    stats.SuppressedStaticRenderers++;
+
+                if (!renderer.enabled || !renderer.gameObject.activeInHierarchy)
+                    continue;
+                if (IsLayerDisabled(renderer.gameObject.layer))
+                    continue;
+                if (IsRendererDisabled(renderer.GetInstanceID()))
+                    continue;
+                if (!meshConverter.IsMeshCached(mesh.GetInstanceID()))
+                    continue;
+
+                stats.RawStaticMeshes++;
+                if (visibleKeys.Add(key))
+                    stats.DedupedStaticMeshes++;
+                else
+                    stats.SuppressedStaticMeshes++;
+            }
+
+            if (configPersistDisabledRenderers.Value)
+            {
+                foreach (var kv in persistentStaticInstances)
+                {
+                    var entry = kv.Value;
+                    if (entry.renderer == null)
+                        continue;
+                    if (entry.renderer.enabled && entry.renderer.gameObject.activeInHierarchy)
+                        continue;
+                    if (IsLayerDisabled(entry.renderer.gameObject.layer))
+                        continue;
+                    if (!meshConverter.IsMeshCached(entry.meshId))
+                        continue;
+
+                    stats.RawStaticMeshes++;
+                    if (visibleKeys.Add(entry.dedupeKey))
+                        stats.DedupedStaticMeshes++;
+                    else
+                        stats.SuppressedStaticMeshes++;
+                }
+            }
+
+            if (scanner != null)
+            {
+                var scannerEntries = scanner.GetDedupeEntries();
+                for (int i = 0; i < scannerEntries.Length; i++)
+                {
+                    stats.RawSceneScanInstances++;
+                    if (visibleKeys.Add(scannerEntries[i].DedupeKey))
+                        stats.DedupedSceneScanInstances++;
+                    else
+                        stats.SuppressedSceneScanInstances++;
+                }
+            }
+
+            stats.DedupedVisibleStaticTotal = stats.DedupedStaticMeshes + stats.DedupedSceneScanInstances;
+            return stats;
+        }
+
         /// <summary>
         /// Debug entry for per-mesh 3D box overlay. Collected on main thread only when HUD is visible.
         /// </summary>
@@ -326,6 +408,7 @@ namespace UnityRemix
             public MeshRenderer renderer; // weak ref via Unity object — becomes null when destroyed
             public int meshId;
             public Matrix4x4 localToWorld;
+            public StaticGeometryKey dedupeKey;
         }
         private Dictionary<int, PersistentStaticInstance> persistentStaticInstances = new Dictionary<int, PersistentStaticInstance>();
         private int skinnedRoundRobinIndex = 0; // rotates through cachedSkinnedRenderers each frame (BakeMesh fallback)
@@ -385,6 +468,8 @@ namespace UnityRemix
         {
             public int meshId;
             public Matrix4x4 localToWorld;
+            public int rendererInstanceId;
+            public StaticGeometryKey dedupeKey;
         }
         
         public struct SkinnedMeshData
@@ -679,6 +764,8 @@ namespace UnityRemix
                 
                 var mesh = meshFilter.sharedMesh;
                 int meshId = mesh.GetInstanceID();
+                int rendererInstanceId = renderer.GetInstanceID();
+                var dedupeKey = StaticGeometryDedupe.BuildKey(renderer, mesh);
                 
                 // Queue mesh for creation if not cached, not already queued, and not previously failed
                 bool needsQueue;
@@ -716,17 +803,19 @@ namespace UnityRemix
                 state.instances.Add(new MeshInstanceData
                 {
                     meshId = meshId,
-                    localToWorld = transform
+                    localToWorld = transform,
+                    rendererInstanceId = rendererInstanceId,
+                    dedupeKey = dedupeKey
                 });
                 totalDrawn++;
                 
                 // Remember this renderer's transform so we can keep drawing it if it gets disabled
-                int rendererInstanceId = renderer.GetInstanceID();
                 persistentStaticInstances[rendererInstanceId] = new PersistentStaticInstance
                 {
                     renderer = renderer,
                     meshId = meshId,
-                    localToWorld = transform
+                    localToWorld = transform,
+                    dedupeKey = dedupeKey
                 };
             }
             
@@ -775,7 +864,9 @@ namespace UnityRemix
                 state.instances.Add(new MeshInstanceData
                 {
                     meshId = entry.meshId,
-                    localToWorld = entry.localToWorld
+                    localToWorld = entry.localToWorld,
+                    rendererInstanceId = entry.renderer.GetInstanceID(),
+                    dedupeKey = entry.dedupeKey
                 });
                 persistentDrawn++;
             }
