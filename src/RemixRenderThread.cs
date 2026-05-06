@@ -297,13 +297,14 @@ namespace UnityRemix
             
             // Draw static mesh instances
             uint objectPickingValue = 1;
+            var claimedRendererIds = new HashSet<int>();
             var claimedStaticKeys = new HashSet<StaticGeometryKey>();
             
             foreach (var instance in state.instances)
             {
                 if (meshConverter.TryGetMeshHandle(instance.meshId, out IntPtr meshHandle))
                 {
-                    if (instance.dedupeKey.IsValid && !claimedStaticKeys.Add(instance.dedupeKey))
+                    if (!StaticGeometryDedupe.TryClaimVisibleInstance(instance.rendererInstanceId, instance.dedupeKey, claimedRendererIds, claimedStaticKeys))
                         continue;
 
                     meshConverter.DrawMeshInstance(meshHandle, instance.localToWorld, objectPickingValue);
@@ -329,7 +330,7 @@ namespace UnityRemix
                             if (frameCapture != null && frameCapture.IsLayerDisabled(instance.Layer))
                                 continue;
 
-                            if (instance.DedupeKey.IsValid && !claimedStaticKeys.Add(instance.DedupeKey))
+                            if (!StaticGeometryDedupe.TryClaimVisibleInstance(instance.RendererInstanceId, instance.DedupeKey, claimedRendererIds, claimedStaticKeys))
                                 continue;
                             
                             var instanceInfo = new RemixAPI.remixapi_InstanceInfo

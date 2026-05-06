@@ -181,9 +181,36 @@ namespace UnityRemix
         public int CachedStaticRendererCount => cachedRenderers.Count;
         public int CachedSkinnedRendererCount => cachedSkinnedRenderers.Count;
 
+        private bool ShouldPreferSceneScan(MeshRenderer renderer, Mesh mesh)
+        {
+            if (renderer == null || mesh == null)
+                return false;
+
+            if (renderer.isPartOfStaticBatch)
+                return true;
+
+            return mesh.subMeshCount > 1 && CountDistinctMaterials(renderer.sharedMaterials) > 1;
+        }
+
+        private static int CountDistinctMaterials(Material[] materials)
+        {
+            if (materials == null || materials.Length == 0)
+                return 0;
+
+            var materialIds = new HashSet<int>();
+            for (int i = 0; i < materials.Length; i++)
+            {
+                if (materials[i] != null)
+                    materialIds.Add(materials[i].GetInstanceID());
+            }
+
+            return materialIds.Count;
+        }
+
         public StaticGeometryStats GetStaticGeometryStats(SceneMeshScanner scanner)
         {
             var stats = new StaticGeometryStats();
+            var claimedRendererIds = new HashSet<int>();
             var visibleKeys = new HashSet<StaticGeometryKey>();
             var rendererKeys = new HashSet<StaticGeometryKey>();
 
@@ -208,6 +235,9 @@ namespace UnityRemix
                 else
                     stats.SuppressedStaticRenderers++;
 
+                if (ShouldPreferSceneScan(renderer, mesh))
+                    continue;
+
                 if (!renderer.enabled || !renderer.gameObject.activeInHierarchy)
                     continue;
                 if (IsLayerDisabled(renderer.gameObject.layer))
@@ -218,7 +248,7 @@ namespace UnityRemix
                     continue;
 
                 stats.RawStaticMeshes++;
-                if (visibleKeys.Add(key))
+                if (StaticGeometryDedupe.TryClaimVisibleInstance(renderer.GetInstanceID(), key, claimedRendererIds, visibleKeys))
                     stats.DedupedStaticMeshes++;
                 else
                     stats.SuppressedStaticMeshes++;
@@ -233,13 +263,17 @@ namespace UnityRemix
                         continue;
                     if (entry.renderer.enabled && entry.renderer.gameObject.activeInHierarchy)
                         continue;
+                    var meshFilter = entry.renderer.GetComponent<MeshFilter>();
+                    var mesh = meshFilter != null ? meshFilter.sharedMesh : null;
+                    if (ShouldPreferSceneScan(entry.renderer, mesh))
+                        continue;
                     if (IsLayerDisabled(entry.renderer.gameObject.layer))
                         continue;
                     if (!meshConverter.IsMeshCached(entry.meshId))
                         continue;
 
                     stats.RawStaticMeshes++;
-                    if (visibleKeys.Add(entry.dedupeKey))
+                    if (StaticGeometryDedupe.TryClaimVisibleInstance(entry.renderer.GetInstanceID(), entry.dedupeKey, claimedRendererIds, visibleKeys))
                         stats.DedupedStaticMeshes++;
                     else
                         stats.SuppressedStaticMeshes++;
@@ -252,7 +286,7 @@ namespace UnityRemix
                 for (int i = 0; i < scannerEntries.Length; i++)
                 {
                     stats.RawSceneScanInstances++;
-                    if (visibleKeys.Add(scannerEntries[i].DedupeKey))
+                    if (StaticGeometryDedupe.TryClaimVisibleInstance(scannerEntries[i].RendererInstanceId, scannerEntries[i].DedupeKey, claimedRendererIds, visibleKeys))
                         stats.DedupedSceneScanInstances++;
                     else
                         stats.SuppressedSceneScanInstances++;
@@ -766,6 +800,12 @@ namespace UnityRemix
                 int meshId = mesh.GetInstanceID();
                 int rendererInstanceId = renderer.GetInstanceID();
                 var dedupeKey = StaticGeometryDedupe.BuildKey(renderer, mesh);
+
+                if (ShouldPreferSceneScan(renderer, mesh))
+                {
+                    persistentStaticInstances.Remove(rendererInstanceId);
+                    continue;
+                }
                 
                 // Queue mesh for creation if not cached, not already queued, and not previously failed
                 bool needsQueue;
@@ -841,6 +881,15 @@ namespace UnityRemix
                 // Skip if the renderer is active — it was already drawn above
                 if (entry.renderer.enabled && entry.renderer.gameObject.activeInHierarchy)
                     continue;
+
+                var meshFilter = entry.renderer.GetComponent<MeshFilter>();
+                var mesh = meshFilter != null ? meshFilter.sharedMesh : null;
+                if (ShouldPreferSceneScan(entry.renderer, mesh))
+                {
+                    if (keysToRemove == null) keysToRemove = new List<int>();
+                    keysToRemove.Add(kv.Key);
+                    continue;
+                }
                 
                 // Skip if mesh isn't cached in Remix yet
                 if (!meshConverter.IsMeshCached(entry.meshId))

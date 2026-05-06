@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace UnityRemix
@@ -92,6 +93,24 @@ namespace UnityRemix
     internal static class StaticGeometryDedupe
     {
         private const float BoundsQuantization = 1000.0f;
+
+        public static bool TryClaimVisibleInstance(
+            int rendererInstanceId,
+            StaticGeometryKey dedupeKey,
+            HashSet<int> claimedRendererIds,
+            HashSet<StaticGeometryKey> claimedKeys)
+        {
+            if (rendererInstanceId != 0 && claimedRendererIds.Contains(rendererInstanceId))
+                return false;
+
+            if (dedupeKey.IsValid && !claimedKeys.Add(dedupeKey))
+                return false;
+
+            if (rendererInstanceId != 0)
+                claimedRendererIds.Add(rendererInstanceId);
+
+            return true;
+        }
 
         public static StaticGeometryKey BuildKey(Renderer renderer, Mesh mesh)
         {
