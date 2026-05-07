@@ -18,6 +18,7 @@ namespace UnityRemix
         private float _maxRenderDistance;
         private float _lightIntensityMultiplier;
         private int _targetFPS;
+        private int _unityWindowCullingMode;
         private bool _enableGameGeometry;
         private bool _enableDistanceCulling;
         private bool _enableVisibilityCulling;
@@ -292,6 +293,24 @@ namespace UnityRemix
 
             RemixImGui.Text(_targetFPS == 0 ? "(Uncapped)" : "");
 
+            string[] cullingModes = { "Full", "UI Only", "Blank" };
+            int clampedMode = Math.Max(0, Math.Min(_unityWindowCullingMode, cullingModes.Length - 1));
+            if (RemixImGui.BeginCombo("Unity Window Rendering", cullingModes[clampedMode]))
+            {
+                for (int i = 0; i < cullingModes.Length; i++)
+                {
+                    bool selected = _unityWindowCullingMode == i;
+                    if (RemixImGui.Selectable(cullingModes[i], selected))
+                    {
+                        _unityWindowCullingMode = i;
+                        _plugin.SetConfig("UnityWindowCullingMode", _unityWindowCullingMode);
+                    }
+                }
+                RemixImGui.EndCombo();
+            }
+            if (RemixImGui.IsItemHovered())
+                RemixImGui.SetTooltip("Controls what the original Unity game window renders.\nFull = normal game window, UI Only = menus/HUD only, Blank = no Unity camera layers.");
+
             if (RemixImGui.Checkbox("Hardware Skinning", ref _hardwareSkinning))
                 _plugin.SetConfig("HardwareSkinning", _hardwareSkinning);
 
@@ -325,6 +344,7 @@ namespace UnityRemix
             _enableLights = _plugin.GetConfigBool("EnableLights");
             _lightIntensityMultiplier = _plugin.GetConfigFloat("IntensityMultiplier");
             _targetFPS = _plugin.GetConfigInt("TargetFPS");
+            _unityWindowCullingMode = _plugin.GetConfigInt("UnityWindowCullingMode");
             _captureStaticMeshes = _plugin.GetConfigBool("CaptureStaticMeshes");
             _captureSkinnedMeshes = _plugin.GetConfigBool("CaptureSkinnedMeshes");
             _hardwareSkinning = _plugin.GetConfigBool("HardwareSkinning");

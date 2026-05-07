@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
@@ -30,6 +31,7 @@ namespace UnityRemix
         private ConfigEntry<bool> configEnableLights;
         private ConfigEntry<float> configLightIntensityMultiplier;
         private ConfigEntry<int> configTargetFPS;
+        private ConfigEntry<int> configUnityWindowCullingMode;
 
         // Debug Toggles
         private ConfigEntry<bool> configCaptureStaticMeshes;
@@ -66,6 +68,8 @@ namespace UnityRemix
         
         private int frameCount = 0;
         private static bool isQuitting = false;
+        private readonly Dictionary<int, int> originalCameraCullingMasks = new Dictionary<int, int>();
+        private int unityUiLayerMask = -1;
         
         // Shared lock for all Remix API calls to prevent deadlocks
         private static readonly object remixApiLock = new object();
@@ -145,6 +149,10 @@ namespace UnityRemix
             configTargetFPS = Config.Bind("Performance", "TargetFPS", 0,
                 new ConfigDescription("Target FPS for the Remix render thread. Set to 0 for uncapped.",
                     new AcceptableValueRange<int>(0, 500)));
+
+            configUnityWindowCullingMode = Config.Bind("Performance", "UnityWindowCullingMode", 1,
+                new ConfigDescription("Original Unity window culling mode: 0 = Full, 1 = UI Only, 2 = Blank.",
+                    new AcceptableValueRange<int>(0, 2)));
 
             // Debug Toggles
             configCaptureStaticMeshes = Config.Bind("Debug", "CaptureStaticMeshes", true,
@@ -498,8 +506,62 @@ namespace UnityRemix
                 renderThread.UpdateFrameState(nextState);
             }
 
+            ApplyUnityWorldRenderingMode();
+
             // Update debug HUD snapshot after all frame data is captured
             debugHUD?.UpdateSnapshot();
+        }
+
+        private void ApplyUnityWorldRenderingMode()
+        {
+            var cameras = Camera.allCameras;
+            int mode = configUnityWindowCullingMode.Value;
+            if (mode > 0)
+            {
+                foreach (var camera in cameras)
+                {
+                    if (camera == null)
+                        continue;
+
+                    int id = camera.GetInstanceID();
+                    if (!originalCameraCullingMasks.ContainsKey(id))
+                        originalCameraCullingMasks[id] = camera.cullingMask;
+
+                    camera.cullingMask = mode == 1 ? GetUnityUiLayerMask() : 0;
+                }
+            }
+            else
+            {
+                foreach (var camera in cameras)
+                {
+                    if (camera == null)
+                        continue;
+
+                    int id = camera.GetInstanceID();
+                    if (originalCameraCullingMasks.TryGetValue(id, out int mask))
+                        camera.cullingMask = mask;
+                }
+
+                originalCameraCullingMasks.Clear();
+            }
+        }
+
+        private int GetUnityUiLayerMask()
+        {
+            if (unityUiLayerMask >= 0)
+                return unityUiLayerMask;
+
+            int mask = 0;
+            int uiLayer = LayerMask.NameToLayer("UI");
+            if (uiLayer >= 0)
+                mask |= 1 << uiLayer;
+
+            int overlayLayer = LayerMask.NameToLayer("Overlay");
+            if (overlayLayer >= 0)
+                mask |= 1 << overlayLayer;
+
+            unityUiLayerMask = mask;
+            return unityUiLayerMask;
         }
         
         void OnDestroy()
@@ -611,6 +673,7 @@ namespace UnityRemix
             switch (key)
             {
                 case "TargetFPS": return configTargetFPS.Value;
+                case "UnityWindowCullingMode": return configUnityWindowCullingMode.Value;
                 default: return 0;
             }
         }
@@ -648,6 +711,7 @@ namespace UnityRemix
             switch (key)
             {
                 case "TargetFPS": configTargetFPS.Value = value; break;
+                case "UnityWindowCullingMode": configUnityWindowCullingMode.Value = Mathf.Clamp(value, 0, 2); break;
             }
         }
 
