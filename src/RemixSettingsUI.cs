@@ -293,21 +293,24 @@ namespace UnityRemix
 
             RemixImGui.Text(_targetFPS == 0 ? "(Uncapped)" : "");
 
-            string[] cullingModes = { "Full", "UI Only", "Blank" };
-            int clampedMode = Math.Max(0, Math.Min(_unityWindowCullingMode, cullingModes.Length - 1));
-            if (RemixImGui.BeginCombo("Unity Window Rendering", cullingModes[clampedMode]))
+            RemixImGui.Text("Unity Window Rendering");
+            RemixImGui.Indent();
+            if (RemixImGui.RadioButton("Full##unity_window", _unityWindowCullingMode == 0))
             {
-                for (int i = 0; i < cullingModes.Length; i++)
-                {
-                    bool selected = _unityWindowCullingMode == i;
-                    if (RemixImGui.Selectable(cullingModes[i], selected))
-                    {
-                        _unityWindowCullingMode = i;
-                        _plugin.SetConfig("UnityWindowCullingMode", _unityWindowCullingMode);
-                    }
-                }
-                RemixImGui.EndCombo();
+                _unityWindowCullingMode = 0;
+                _plugin.SetConfig("UnityWindowCullingMode", _unityWindowCullingMode);
             }
+            if (RemixImGui.RadioButton("UI Only##unity_window", _unityWindowCullingMode == 1))
+            {
+                _unityWindowCullingMode = 1;
+                _plugin.SetConfig("UnityWindowCullingMode", _unityWindowCullingMode);
+            }
+            if (RemixImGui.RadioButton("Blank##unity_window", _unityWindowCullingMode == 2))
+            {
+                _unityWindowCullingMode = 2;
+                _plugin.SetConfig("UnityWindowCullingMode", _unityWindowCullingMode);
+            }
+            RemixImGui.Unindent();
             if (RemixImGui.IsItemHovered())
                 RemixImGui.SetTooltip("Controls what the original Unity game window renders.\nFull = normal game window, UI Only = menus/HUD only, Blank = no Unity camera layers.");
 
