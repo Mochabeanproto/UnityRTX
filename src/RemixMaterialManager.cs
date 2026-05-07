@@ -1020,7 +1020,11 @@ namespace UnityRemix
                 {
                     hasAlpha = SampleAlphaBC3(pixelData);
                 }
-                // BC1 (DXT1) has only 1-bit punch-through alpha, treat as opaque
+                else if (format == RemixAPI.remixapi_Format.REMIXAPI_FORMAT_BC1_RGB_SRGB ||
+                         format == RemixAPI.remixapi_Format.REMIXAPI_FORMAT_BC1_RGB_UNORM)
+                {
+                    hasAlpha = SampleAlphaBC1(pixelData);
+                }
                 
                 if (hasAlpha)
                 {
@@ -1030,7 +1034,10 @@ namespace UnityRemix
                     // This distinguishes real transparency (decal backgrounds at alpha=0) from
                     // smoothness-as-alpha packing (Standard shader Opaque mode, values ~50-230).
                     bool hasCutoutAlpha;
-                    if (format == RemixAPI.remixapi_Format.REMIXAPI_FORMAT_BC3_SRGB ||
+                    if (format == RemixAPI.remixapi_Format.REMIXAPI_FORMAT_BC1_RGB_SRGB ||
+                        format == RemixAPI.remixapi_Format.REMIXAPI_FORMAT_BC1_RGB_UNORM)
+                        hasCutoutAlpha = SampleCutoutAlphaBC1(pixelData);
+                    else if (format == RemixAPI.remixapi_Format.REMIXAPI_FORMAT_BC3_SRGB ||
                         format == RemixAPI.remixapi_Format.REMIXAPI_FORMAT_BC3_UNORM)
                         hasCutoutAlpha = SampleCutoutAlphaBC3(pixelData);
                     else
@@ -1894,6 +1901,44 @@ namespace UnityRemix
             return totalSampled > 0 && nearZeroCount * 10 >= totalSampled;
         }
 
+        private static bool SampleAlphaBC1(byte[] rawData)
+        {
+            int blockCount = rawData.Length / 8;
+            int step = Math.Max(1, blockCount / 256);
+            for (int b = 0; b < blockCount; b += step)
+            {
+                int offset = b * 8;
+                ushort color0 = (ushort)(rawData[offset] | (rawData[offset + 1] << 8));
+                ushort color1 = (ushort)(rawData[offset + 2] | (rawData[offset + 3] << 8));
+                if (color0 <= color1)
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool SampleCutoutAlphaBC1(byte[] rawData)
+        {
+            int blockCount = rawData.Length / 8;
+            if (blockCount == 0) return false;
+
+            int sampleCount = Math.Min(blockCount, 1024);
+            int step = Math.Max(1, blockCount / sampleCount);
+            int cutoutBlockCount = 0;
+            int totalSampled = 0;
+
+            for (int b = 0; b < blockCount; b += step)
+            {
+                int offset = b * 8;
+                ushort color0 = (ushort)(rawData[offset] | (rawData[offset + 1] << 8));
+                ushort color1 = (ushort)(rawData[offset + 2] | (rawData[offset + 3] << 8));
+                totalSampled++;
+                if (color0 <= color1)
+                    cutoutBlockCount++;
+            }
+
+            return totalSampled > 0 && cutoutBlockCount * 10 >= totalSampled;
+        }
+        
         /// <summary>
         /// Check if a BC3/DXT5 texture has any non-trivial alpha by scanning alpha endpoint
         /// bytes in each 16-byte block. Returns true if any block has an endpoint below 250.
